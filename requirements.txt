@@ -7,6 +7,8 @@ firebase-admin
 esd
 playwright
 firebase-admin
+pymongo
+dnspython
 httpx
 lxml
 # This assumes 'esd.sofascore' is installed as a local package or symlinked
