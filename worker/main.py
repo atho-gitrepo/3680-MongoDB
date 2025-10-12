@@ -2,91 +2,119 @@ import datetime
 import logging
 from typing import List, Dict, Any, Optional, Set
 import requests
-import os # Needed for environment variables
-
-# --- Mock/Assumed Imports from your esd/sofascore package ---
-# These imports are necessary for the main logic to function.
+import os 
+# NOTE: Replace the MOCK CLASSES below with these imports from your package
 from esd.sofascore.client import SofascoreClient
-# from esd.sofascore.types import Event, Standing, Tournament, Season, Team, Category
-# We redefine the minimal necessary mocks here to make the function runnable for testing
-# In your real environment, you must import the actual classes.
+# from esd.sofascore.types import Event, Standing, Tournament, Season, Team, Category 
 
+# --- WARNING: MOCK CLASSES RETAINED FOR STANDALONE EXECUTION ONLY ---
+# In your real project, REMOVE these definitions and use the actual imports
 class Team:
     def __init__(self, id: int, name: str): self.id = id; self.name = name
-
 class Event:
     def __init__(self, home_team: Team, away_team: Team, start_time: datetime.datetime, tournament_name: str):
         self.home_team = home_team; self.away_team = away_team; self.start_time = start_time; self.tournament_name = tournament_name
-
 class Tournament:
     def __init__(self, id: int, name: str): self.id = id; self.name = name
-
 class Season:
     def __init__(self, id: int, is_current: bool = True): self.id = id; self.is_current = is_current
-
 class StandingRow:
     def __init__(self, team: Team, rank: int): self.team = team; self.rank = rank
-
 class Standing:
     def __init__(self, rows: List[StandingRow]): self.rows = rows
-
 class Category:
     FOOTBALL = 1
     def __init__(self, value: int): self.value = value
     @property
     def name(self): return "FOOTBALL" if self.value == 1 else "OTHER"
+# --- END MOCK CLASSES ---
 
-# --- Assumed Functions from previous steps ---
+logger = logging.getLogger(__name__)
 
-# You must ensure these functions from your previous steps are in main.py 
-# or imported correctly for the final script to run.
+# --- Helper Functions (Re-implemented with real logic) ---
 
 def get_current_season_id(service: Any, tournament_id: int) -> Optional[int]:
-    """Mock implementation or actual function imported from a utility."""
-    # Placeholder implementation
-    return 9999 
+    """Finds the ID of the current (or most recent) season for a given tournament."""
+    try:
+        seasons: List[Season] = service.get_tournament_seasons(tournament_id)
+        if not seasons: return None
+        current_season = next((s.id for s in seasons if hasattr(s, 'is_current') and s.is_current), None)
+        if current_season is not None: return current_season
+        return seasons[0].id
+    except Exception as e:
+        logger.warning(f"Failed to find season for tournament {tournament_id}: {e}")
+        return None
 
-def get_top_bottom_daily_fixtures(client: Any, category_enum: Category, date_str: str) -> List[Dict[str, Any]]:
-    """
-    Mock implementation of the core function that generates fixtures.
-    In your real code, this is the function developed in the previous step.
-    """
-    # Simulate a successful fetch with mock data
-    today = datetime.datetime.now()
+def get_top_bottom_daily_fixtures(client: Any, category_enum: Category, date_str: str = 'today') -> List[Dict[str, Any]]:
+    """Retrieves the daily fixtures involving the top 3 and last 3 teams."""
+    if not client.service: client.initialize()
+    service = client.service
     
-    # Mock data involving top/bottom teams
-    fixtures = [
-        {
-            "tournament": "Premier League",
-            "match": "PL Team 1 vs PL Team 18",
-            "time": today.strftime("%H:%M"),
-            "teams_of_interest": "PL Team 1, PL Team 18"
-        },
-        {
-            "tournament": "La Liga",
-            "match": "LL Team 3 vs LL Team 20",
-            "time": today.strftime("%H:%M"),
-            "teams_of_interest": "LL Team 3, LL Team 20"
-        }
-    ]
-    
-    # Simulate a scenario with no fixtures for robustness
-    if date_str == 'tomorrow':
+    logger.info(f"Fetching tournaments for category: {category_enum.name}")
+    try:
+        tournaments: List[Tournament] = service.get_tournaments_by_category(category_enum)
+    except Exception as e:
+        logger.error(f"Error fetching tournaments: {e}")
         return []
-        
-    return fixtures
 
-# --- New Telegram Function ---
+    target_team_ids: Set[int] = set()
+    for t in tournaments:
+        season_id = get_current_season_id(service, t.id)
+        if season_id is None: continue
+
+        try:
+            standings_groups: List[Standing] = service.get_tournament_standings(t.id, season_id)
+        except Exception as e:
+            logger.warning(f"Skipping {t.name} due to standings error: {e}")
+            continue
+            
+        if not standings_groups or not hasattr(standings_groups[0], 'rows'): continue
+             
+        standing_rows: List[StandingRow] = standings_groups[0].rows
+        num_teams = len(standing_rows)
+        
+        top_teams = standing_rows[:3]
+        last_three_start_index = max(3, num_teams - 3)
+        bottom_teams = standing_rows[last_three_start_index:]
+        
+        for row in top_teams + bottom_teams:
+            if hasattr(row, 'team') and hasattr(row.team, 'id'):
+                target_team_ids.add(row.team.id)
+
+    logger.info(f"Identified {len(target_team_ids)} unique teams of interest across all tournaments.")
+
+    try:
+        daily_events: List[Event] = client.get_events(date_str)
+    except Exception as e:
+        logger.error(f"Error fetching daily events: {e}")
+        return []
+    
+    filtered_fixtures = []
+    for event in daily_events:
+        home_id = event.home_team.id
+        away_id = event.away_team.id
+        
+        if home_id in target_team_ids or away_id in target_team_ids:
+            target_teams_involved = []
+            if home_id in target_team_ids: target_teams_involved.append(event.home_team.name)
+            if away_id in target_team_ids: target_teams_involved.append(event.away_team.name)
+
+            tournament_name = getattr(event, 'tournament_name', 'Unknown')
+            start_time = getattr(event, 'start_time', None)
+
+            filtered_fixtures.append({
+                "tournament": tournament_name,
+                "match": f"{event.home_team.name} vs {event.away_team.name}",
+                "time": start_time.strftime("%H:%M") if isinstance(start_time, datetime.datetime) else 'N/A',
+                "teams_of_interest": ", ".join(sorted(list(set(target_teams_involved))))
+            })
+            
+    return filtered_fixtures
+
+# --- Telegram Function ---
 
 def send_telegram_message(message: str, chat_id: str, bot_token: str):
-    """
-    Sends a message to a specified Telegram chat using the Bot API.
-    
-    Args:
-        message (str): The text message to send.
-        chat_id (str): The target chat ID (e.g., '@mychannel' or user ID).
-        bot_token (str): The Telegram Bot token.
-    """
+    """Sends a message to a specified Telegram chat using the Bot API."""
     if not bot_token or not chat_id:
         logging.error("Telegram BOT_TOKEN or CHAT_ID is missing. Cannot send message.")
         return
@@ -103,40 +131,50 @@ def send_telegram_message(message: str, chat_id: str, bot_token: str):
         response = requests.post(url, data=payload)
         response.raise_for_status()
         logging.info("Telegram message sent successfully.")
-    except requests.exceptions.HTTPError as e:
-        logging.error(f"Telegram API HTTP Error: {response.status_code} - {response.text}")
     except requests.exceptions.RequestException as e:
         logging.error(f"Telegram request failed: {e}")
 
-# --- Main Execution Block (The new content for your main.py) ---
+# --- Main Execution Block ---
 
 if __name__ == '__main__':
     # Configuration
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     
-    # 📌 IMPORTANT: Define these environment variables or replace with actual strings
-    # Get your Bot Token from BotFather and your Chat ID (e.g., from @userinfobot)
+    # 📌 GET ENVIRONMENT VARIABLES
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN") 
-    TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") # Use a group/channel ID
+    TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
     
     FOOTBALL_CATEGORY = Category(1) 
     
-    # Initialize Client and Service
+    # Initialize Client
     client = SofascoreClient()
-    client.initialize() 
-
+    
     try:
+        client.initialize()
         fixture_date = 'today'
+        
+        # 🔑 THIS CALL EXECUTES THE DATA RETRIEVAL
         fixtures = get_top_bottom_daily_fixtures(client, FOOTBALL_CATEGORY, date_str=fixture_date)
         
-        # --- Message Generation ---
+        # --- Console Output (To fulfill your request for the list when running) ---
+        
+        print("\n" + "=" * 60)
+        print(f"  DAILY FIXTURES FOR TOP 3 & LAST 3 TEAMS ({fixture_date.upper()})")
+        print("=" * 60)
         
         header = f"⚽ Sofascore Daily Fixtures - {fixture_date.capitalize()} ⚽\n\n"
         
         if fixtures:
             body = "*Matches Involving Top 3 or Last 3 Teams:*\n"
             for f in fixtures:
-                # Format each fixture clearly using Markdown bolding
+                # Print to console
+                print(f"Tournament: {f['tournament']}")
+                print(f"Match:      {f['match']}")
+                print(f"Time:       {f['time']}")
+                print(f"Involved:   {f['teams_of_interest']}")
+                print("-" * 50)
+                
+                # Build Telegram body
                 body += (
                     f"\n*🏆 {f['tournament']}*\n"
                     f"  {f['match']} @ {f['time']}\n"
@@ -146,9 +184,10 @@ if __name__ == '__main__':
             final_message = header + body
             
         else:
+            print("No relevant fixtures found for today.")
             final_message = header + "No relevant fixtures found for today."
             
-        # --- Send Message ---
+        # --- Send Telegram Message ---
         
         send_telegram_message(
             message=final_message,
