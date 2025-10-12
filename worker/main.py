@@ -168,7 +168,7 @@ if __name__ == '__main__':
     TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
     
     # We pass the Category instance for Football (assuming its ID is 1)
-    FOOTBALL_CATEGORY = Category(1) 
+    FOOTBALL_CATEGORY = Category.FOOTBALL
     
     # Initialize Client
     client = SofascoreClient()
