@@ -6,7 +6,8 @@ import logging
 from datetime import datetime, timedelta
 # Import the MongoDB libraries
 import pymongo
-from pymongo.errors import ConnectionError, ConfigurationError, OperationFailure
+# FIX: Replaced ConnectionError with ConnectionFailure for modern pymongo versions
+from pymongo.errors import ConnectionFailure, ConfigurationError, OperationFailure
 from typing import List, Dict, Any
 
 # Correct import structure for your local library
@@ -43,8 +44,6 @@ STATUS_LIVE = ['LIVE', '1H', '2H', 'ET', 'P']
 STATUS_HALFTIME = 'HT'
 STATUS_FINISHED = ['FT', 'AET', 'PEN'] 
 MAX_FETCH_RETRIES = 3 
-# The BET_RESOLUTION_WAIT_MINUTES is now less relevant as regular bets are resolved at HT, 
-# but we keep it for general cleanup/cleanup of old entries.
 BET_RESOLUTION_WAIT_MINUTES = 180 
 
 # =========================================================
@@ -83,7 +82,8 @@ class MongoDBManager:
             self.CONFIG_COLLECTION = self.db["config"]
 
             logger.info(f"MongoDB initialized successfully. Database: {DB_NAME}")
-        except (ConnectionError, ConfigurationError, OperationFailure) as e:
+        # FIX: Catch ConnectionFailure instead of the removed ConnectionError
+        except (ConnectionFailure, ConfigurationError, OperationFailure) as e:
             logger.error(f"Failed to initialize MongoDB: {e}")
             self.db = None
             raise
@@ -170,13 +170,10 @@ class MongoDBManager:
     def get_stale_unresolved_bets(self, minutes_to_wait=BET_RESOLUTION_WAIT_MINUTES):
         if not self.db: return {}
         try:
-            # Performs a full scan, but runs only once every FIXTURE_API_INTERVAL (~15 min)
-            # Find bets where 'placed_at' (ISO string) is before the threshold
+            # Finds any bet where 'placed_at' (ISO string) is before the threshold
             time_threshold = (datetime.utcnow() - timedelta(minutes=minutes_to_wait)).isoformat()
             
-            # Since only BET_TYPE_REGULAR is active and resolved at HT, any bet reaching 
-            # this far is an old, unresolved entry from a previous, different bet type 
-            # or a failure. We now look for *any* unresolved bet that is old.
+            # Since only BET_TYPE_REGULAR is active and resolved at HT, this catches strays/failures.
             query = {
                 'placed_at': {'$lt': time_threshold}
             }
@@ -346,7 +343,6 @@ def get_live_matches():
         logger.error("Sofascore client is not initialized.")
         return []
     try:
-        # 🟢 FIX: Call the correct method signature from client.py
         # client uses get_events(live=True) to fetch live events.
         live_events = SOFASCORE_CLIENT.get_events(live=True)
         logger.info(f"Fetched {len(live_events)} live matches.")
@@ -358,9 +354,6 @@ def get_live_matches():
 def get_finished_match_details(sofascored_id):
     """
     Fetches the full event details for a match ID using the active Sofascore client.
-    
-    CRITICAL FIX: Uses the dedicated get_event endpoint instead of the general search, 
-    which was unreliable for finished match IDs.
     """
     if not SOFASCORE_CLIENT: 
         logger.error("Sofascore client is not initialized.")
@@ -369,7 +362,7 @@ def get_finished_match_details(sofascored_id):
     sofascored_id = int(sofascored_id) 
     
     try:
-        # 🟢 FIX: Use the dedicated get_event method (from service.py) for reliable retrieval.
+        # Use the dedicated get_event method for reliable retrieval.
         match_data = SOFASCORE_CLIENT.get_event(sofascored_id)
         
         # Check if the returned object is the correct type and has the ID
@@ -387,6 +380,7 @@ def get_finished_match_details(sofascored_id):
 def robust_get_finished_match_details(sofascored_id):
     """
     Wrapper to attempt fetching match details with retries and client refresh on persistent failure.
+    Used for cleaning up stale bets.
     """
     global SOFASCORE_CLIENT
     
@@ -420,7 +414,7 @@ def robust_get_finished_match_details(sofascored_id):
 def place_regular_bet(state, fixture_id, score, match_info):
     """Handles placing the initial 36' bet."""
     
-    # 🟢 OPTIMIZED: Use direct lookup instead of full collection scan
+    # Use direct lookup instead of full collection scan
     if db_manager.is_bet_unresolved(fixture_id):
         logger.info(f"Regular bet already exists in 'unresolved_bets' for fixture {fixture_id}. Skipping placement and Telegram message.")
         # Ensure the tracked state is marked as placed to stop re-checking in subsequent runs
@@ -435,9 +429,7 @@ def place_regular_bet(state, fixture_id, score, match_info):
         db_manager.update_tracked_match(fixture_id, state)
         unresolved_data = {
             'match_name': match_info['match_name'],
-            # Changed to ISO string for easier MongoDB querying
             'placed_at': datetime.utcnow().isoformat(), 
-            # 🟢 MODIFIED: Use corrected league/country info
             'league': match_info['league_name'],
             'country': match_info['country'],
             'league_id': match_info['league_id'],
@@ -448,7 +440,6 @@ def place_regular_bet(state, fixture_id, score, match_info):
         }
         db_manager.add_unresolved_bet(fixture_id, unresolved_data)
         
-        # 🟢 MODIFIED: Use corrected league/country info in Telegram message
         message = (
             f"⏱️ **36' - {match_info['match_name']}**\n"
             f"🌍 {match_info['country']} | 🏆 {match_info['league_name']}\n"
@@ -462,10 +453,9 @@ def place_regular_bet(state, fixture_id, score, match_info):
 
 
 def check_ht_result(state, fixture_id, score, match_info):
-    """Checks the result of all placed bets at halftime."""
+    """Checks the result of the regular 36' bet at halftime."""
     
     current_score = score
-    # 🟢 OPTIMIZED: Use targeted getter function
     unresolved_bet_data = db_manager.get_unresolved_bet_data(fixture_id) 
 
     if unresolved_bet_data:
@@ -473,11 +463,10 @@ def check_ht_result(state, fixture_id, score, match_info):
         outcome = None
         message = ""
 
-        # 🟢 Use corrected league/country info from the 'unresolved_bet_data' 
         country_name = unresolved_bet_data.get('country', 'N/A') 
         league_name = unresolved_bet_data.get('league', 'N/A')
         
-        # Since only the 'regular' bet type is active, we check its result here.
+        # Only process the active 'regular' bet type
         if bet_type == BET_TYPE_REGULAR:
             bet_score = unresolved_bet_data.get('36_score', 'N/A')
             outcome = 'win' if current_score == bet_score else 'loss'
@@ -503,7 +492,7 @@ def check_ht_result(state, fixture_id, score, match_info):
             db_manager.move_to_resolved(fixture_id, unresolved_bet_data, outcome)
             send_telegram(message)
     
-    # 🟢 OPTIMIZED: Use targeted lookup instead of checking the cache
+    # Clean up the tracked match if the bet is now resolved (or wasn't placed)
     if not db_manager.is_bet_unresolved(fixture_id):
         db_manager.delete_tracked_match(fixture_id)
 
@@ -531,13 +520,12 @@ def process_live_match(match):
     if status.upper() not in STATUS_LIVE and status.upper() != STATUS_HALFTIME: return
     if minute is None and status.upper() not in [STATUS_HALFTIME]: return
     
-    # Initialize state with only the required key
+    # Initialize state with only the required keys
     state = db_manager.get_tracked_match(fixture_id) or {
         '36_bet_placed': False,
         '36_score': None,
     }
     
-    # 🟢 Extraction is already correct here (Country Name is Category Name)
     match_info = {
         'match_name': match_name,
         'league_name': match.tournament.name if hasattr(match, 'tournament') else 'N/A',
@@ -545,37 +533,33 @@ def process_live_match(match):
         'league_id': match.tournament.id if hasattr(match, 'tournament') else 'N/A'
     }
         
+    # 1. Place the regular 36' bet
     if status.upper() == '1H' and minute in MINUTES_REGULAR_BET and not state.get('36_bet_placed'):
         place_regular_bet(state, fixture_id, score, match_info)
         
-    # Replaced firebase_manager with db_manager
-    elif status.upper() == STATUS_HALFTIME and db_manager.is_bet_unresolved(fixture_id): # OPTIMIZED
-        # Only check HT result if an unresolved bet exists (to avoid unnecessary HT checks)
+    # 2. Check the result at Half Time
+    elif status.upper() == STATUS_HALFTIME and db_manager.is_bet_unresolved(fixture_id): 
         check_ht_result(state, fixture_id, score, match_info)
         
-    # Replaced firebase_manager with db_manager
-    # Clean up the tracked match if it's finished and all bets are resolved/cleared
-    if status in STATUS_FINISHED and not db_manager.is_bet_unresolved(fixture_id): # OPTIMIZED
+    # 3. Clean up the tracked match if it's finished and all bets are resolved/cleared
+    if status in STATUS_FINISHED and not db_manager.is_bet_unresolved(fixture_id): 
         db_manager.delete_tracked_match(fixture_id)
 
 
 def check_and_resolve_stale_bets():
     """
     Checks and resolves old, unresolved bets by fetching their final status.
-    This is primarily for cleanup in case a bet failed to resolve at HT.
+    This is the cleanup and error recovery mechanism.
     """
-    # Replaced firebase_manager with db_manager
-    # The minimum wait is still useful for cleaning up any stray entries.
     stale_bets = db_manager.get_stale_unresolved_bets(BET_RESOLUTION_WAIT_MINUTES)
     if not stale_bets:
         return
     
-    # Replaced firebase_manager with db_manager
+    # Check if the API call interval has passed
     last_call_str = db_manager.get_last_api_call()
     last_call_dt = None
     if last_call_str:
         try:
-            # MongoDB stores ISO format which works with datetime.fromisoformat
             last_call_dt = datetime.fromisoformat(last_call_str)
         except ValueError:
             logger.warning("Could not parse last_resolution_api_call timestamp. Proceeding with API call.")
@@ -590,10 +574,9 @@ def check_and_resolve_stale_bets():
     successful_api_call = False
     
     for match_id, bet_info in stale_bets.items():
-        # Get the stored Sofascore ID for lookup
         sofascored_id = bet_info.get('sofascored_id', match_id) 
 
-        # Use the robust fetcher with the Sofascore ID
+        # Use the robust fetcher
         match_data = robust_get_finished_match_details(sofascored_id)
         
         if not match_data:
@@ -602,53 +585,31 @@ def check_and_resolve_stale_bets():
         
         successful_api_call = True 
 
-        # Check the status from the reliably fetched match_data
         status_description = match_data.status.description.upper()
         
         if 'FINISHED' in status_description or 'ENDED' in status_description:
-            # Use the final score from the reliably fetched match_data
-            final_score = f"{match_data.home_score.current or 0}-{match_data.away_score.current or 0}"
             match_name = bet_info.get('match_name', f"Match {match_id}")
             bet_type = bet_info.get('bet_type', 'unknown')
             
-            # 🟢 Retrieve the corrected info from database
             country_name = bet_info.get('country', 'N/A') 
             league_name = bet_info.get('league', 'N/A') 
             
             outcome = None
             message = ""
 
-            # Re-resolve the only intended bet type if it somehow reached here without resolution
-            if bet_type == BET_TYPE_REGULAR:
-                 bet_score = bet_info.get('36_score', 'N/A')
-                 # Since this is a final score check, the assumption that the HT score 
-                 # is the same as the final score for a 'regular' bet might be flawed.
-                 # However, since the bet is meant to be resolved at HT, any entry here is likely a bug/stray.
-                 # We default to a generic "resolved" message for cleanup.
-                 outcome = 'unknown_cleanup'
-                 message = (
-                    f"🧹 **CLEANUP RESOLUTION - Regular Bet**\n"
-                    f"⚽ {match_name}\n"
-                    f"🌍 {country_name} | 🏆 {league_name}\n"
-                    f"⚠️ **Bet Type:** {bet_type} (Resolved outside HT window)\n"
-                    f"📊 Outcome: **CLEANED UP**"
-                )
-            else:
-                 # Clean up any other old/stray bet types
-                 outcome = 'stray_cleanup'
-                 message = (
-                    f"🧹 **CLEANUP RESOLUTION - Stray Bet**\n"
-                    f"⚽ {match_name}\n"
-                    f"🌍 {country_name} | 🏆 {league_name}\n"
-                    f"⚠️ **Bet Type:** {bet_type} (Unused/Stray)\n"
-                    f"📊 Outcome: **CLEANED UP**"
-                )
+            # Generic cleanup message for any bet found here (it should have been resolved earlier)
+            outcome = 'stray_cleanup'
+            message = (
+                f"🧹 **CLEANUP RESOLUTION - Stray Bet**\n"
+                f"⚽ {match_name}\n"
+                f"🌍 {country_name} | 🏆 {league_name}\n"
+                f"⚠️ **Bet Type:** {bet_type} (Resolved outside normal window)\n"
+                f"📊 Outcome: **CLEANED UP**"
+            )
             
             if outcome:
                 if send_telegram(message):
-                    # Replaced firebase_manager with db_manager
                     db_manager.move_to_resolved(match_id, bet_info, outcome)
-                    # We only delete the tracked match here if the bet was successfully resolved
                     db_manager.delete_tracked_match(match_id) 
                 time.sleep(1)
         
@@ -656,14 +617,12 @@ def check_and_resolve_stale_bets():
             logger.info(f"Match {match_id} is stale but not yet finished. Current status: {status_description}. Retrying later.")
 
     if successful_api_call:
-        # Replaced firebase_manager with db_manager
         db_manager.update_last_api_call()
         
 def run_bot_cycle():
     """Run one complete cycle of the bot"""
     logger.info("Starting bot cycle...")
     
-    # Replaced firebase_manager with db_manager
     if not SOFASCORE_CLIENT or not db_manager or not db_manager.db:
         logger.error("Services are not initialized. Skipping cycle.")
         return
