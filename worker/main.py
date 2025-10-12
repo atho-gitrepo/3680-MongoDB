@@ -116,7 +116,7 @@ if __name__ == '__main__':
     
     # 📌 IMPORTANT: Define these environment variables or replace with actual strings
     # Get your Bot Token from BotFather and your Chat ID (e.g., from @userinfobot)
-    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") 
+    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN") 
     TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") # Use a group/channel ID
     
     FOOTBALL_CATEGORY = Category(1) 
