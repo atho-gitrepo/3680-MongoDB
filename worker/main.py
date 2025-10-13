@@ -90,17 +90,17 @@ def get_top_bottom_daily_fixtures(client: Any, category_enum: Category, date_str
 
         try:
             standings_groups: List[Standing] = service.get_tournament_standings(t.id, season_id)
-            if not standings_groups or not hasattr(standings_groups[0], 'rows') or not standings_groups[0].rows:
+            if not standings_groups or not hasattr(standings_groups[0], 'items') or not standings_groups[0].items:
                 logger.warning(f"No standings available for {t.name}. Skipping.")
                 continue
         except Exception as e:
             logger.warning(f"Skipping {t.name} due to standings error: {e}")
             continue
 
-        standing_rows = standings_groups[0].rows
-        num_teams = len(standing_rows)
-        top_teams = standing_rows[:3]
-        bottom_teams = standing_rows[-3:] if num_teams >= 3 else standing_rows
+        standing_items = standings_groups[0].items
+        num_teams = len(standing_items)
+        top_teams = standing_items[:3]
+        bottom_teams = standing_items[-3:] if num_teams >= 3 else standing_items
 
         for row in top_teams + bottom_teams:
             if hasattr(row, 'team') and hasattr(row.team, 'id'):
@@ -217,12 +217,13 @@ if __name__ == '__main__':
                 print("No relevant fixtures found for this region today.")
                 final_message = header + "No relevant fixtures found for this region today."
 
-            # Send Telegram message
-            send_telegram_message(
-                message=final_message,
-                chat_id=TELEGRAM_CHAT_ID,
-                bot_token=TELEGRAM_BOT_TOKEN
-            )
+            # Send Telegram message only if chat_id and bot_token are provided
+            if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                send_telegram_message(
+                    message=final_message,
+                    chat_id=TELEGRAM_CHAT_ID,
+                    bot_token=TELEGRAM_BOT_TOKEN
+                )
 
     except Exception as e:
         error_message = f"🚨 FATAL ERROR: {type(e).__name__} - {e}"
