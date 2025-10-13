@@ -6,8 +6,8 @@ import os
 
 # --- CORE PROJECT IMPORTS ---
 from esd.sofascore.client import SofascoreClient
-# Assuming these types are from your project, using the updated Standing type
-from esd.sofascore.types import Event, Standing, Tournament, Season, Team, Category 
+# Note: Removed 'Standing' import as it's no longer used by any function here
+from esd.sofascore.types import Event, Tournament, Season, Category 
 from esd.utils import get_today
 
 logger = logging.getLogger(__name__)
@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 def get_current_season_id(service: Any, tournament_id: int) -> Optional[int]:
     """
     Finds the ID of the current (or most recent) season for a given tournament.
+    (Kept in case it's used elsewhere, but not used by get_all_daily_fixtures)
     """
     try:
         seasons: List[Season] = service.get_tournament_seasons(tournament_id)
@@ -60,87 +61,56 @@ def parse_event_time(start_time) -> str:
         return 'N/A'
 
 
-def get_top_bottom_daily_fixtures(client: Any, category_enum: Category, date_str: str = 'today') -> List[Dict[str, Any]]:
+# NOTE: get_top_bottom_daily_fixtures has been REMOVED.
+
+
+# ######################################################################
+# ### CORE FUNCTION: Get ALL Daily Fixtures for a Region
+# ######################################################################
+
+def get_all_daily_fixtures(client: Any, category_enum: Category, date_str: str = 'today') -> List[Dict[str, Any]]:
     """
-    Retrieves daily fixtures involving the top 3 and last 3 teams for a tournament region.
+    Retrieves ALL daily fixtures that belong to ANY tournament in the specified region.
     """
     if not client.service:
         client.initialize()
     
     service = client.service
 
-    # 1. Gather tournaments for the category
-    logger.info(f"Fetching tournaments for category: {category_enum.name}")
+    # 1. Gather all tournament IDs for the category
+    logger.info(f"Fetching all tournament IDs for category: {category_enum.name}")
     try:
         tournaments: List[Tournament] = service.get_tournaments_by_category(category_enum)
         if not tournaments:
             logger.info(f"No tournaments found for category: {category_enum.name}")
             return []
+            
+        # Collect IDs for filtering
+        target_tournament_ids: Set[int] = {t.id for t in tournaments if hasattr(t, 'id')}
+        logger.info(f"Identified {len(target_tournament_ids)} tournaments in category {category_enum.name}.")
+
     except Exception as e:
-        logger.error(f"Error fetching tournaments: {e}")
+        logger.error(f"Error fetching tournaments for all fixtures: {e}")
         return []
 
-    target_team_ids: Set[int] = set()
-
-    # 2. Identify top 3 and last 3 teams for each tournament
-    for t in tournaments:
-        season_id = get_current_season_id(service, t.id)
-        if season_id is None:
-            logger.warning(f"No season found for tournament: {t.name}. Skipping.")
-            continue
-
-        try:
-            standings_groups: List[Standing] = service.get_tournament_standings(t.id, season_id)
-            # The standing check is simplified here as the Standings class now uses List[StandingItem]
-            # but we keep the spirit of the original check to handle empty lists or missing items attribute.
-            if not standings_groups or not hasattr(standings_groups[0], 'items') or not standings_groups[0].items:
-                logger.warning(f"No standings available for {t.name}. Skipping.")
-                continue
-        except Exception as e:
-            # This is where the original 'standings' error was caught, now better handled
-            logger.warning(f"Skipping {t.name} due to standings error: {e}")
-            continue
-
-        standing_items = standings_groups[0].items
-        num_teams = len(standing_items)
-        top_teams = standing_items[:3]
-        bottom_teams = standing_items[-3:] if num_teams >= 3 else standing_items
-
-        for row in top_teams + bottom_teams:
-            # We assume row.team is not None based on the parse_standing_item logic
-            if hasattr(row, 'team') and hasattr(row.team, 'id') and row.team.id is not None:
-                # Need to check for None because the StandingItem fix uses Optional[int] for team ID
-                target_team_ids.add(row.team.id)
-
-    logger.info(f"Identified {len(target_team_ids)} unique teams in category {category_enum.name}.")
-
-    # 3. Get all events for the specified date
-    # 🌟 FIX APPLIED: CALL get_today() 🌟
+    # 2. Get all events for the specified date (using the fixed date calling)
     date_to_fetch = get_today() if date_str == 'today' else date_str
-    
     try:
         daily_events: List[Event] = client.get_events(date_to_fetch)
         if not daily_events:
             logger.info(f"No events found for date {date_to_fetch}")
             return []
     except Exception as e:
-        # This error is now clearer as date_to_fetch is a string
-        logger.error(f"Failed to get events for date {date_to_fetch}: {e}") 
+        logger.error(f"Failed to get all events for date {date_to_fetch}: {e}")
         return []
 
-    # 4. Filter and format results
+    # 3. Filter and format results
     filtered_fixtures = []
     for event in daily_events:
-        home_id = getattr(event.home_team, 'id', None)
-        away_id = getattr(event.away_team, 'id', None)
+        # Assuming event has a tournament ID associated with it
+        tournament_id = getattr(event, 'tournament_id', None) 
 
-        if home_id in target_team_ids or away_id in target_team_ids:
-            target_teams_involved = []
-            if home_id in target_team_ids:
-                target_teams_involved.append(event.home_team.name)
-            if away_id in target_team_ids:
-                target_teams_involved.append(event.away_team.name)
-
+        if tournament_id in target_tournament_ids:
             tournament_name = getattr(event, 'tournament_name', 'Unknown')
             start_time = parse_event_time(getattr(event, 'start_time', None))
 
@@ -148,8 +118,10 @@ def get_top_bottom_daily_fixtures(client: Any, category_enum: Category, date_str
                 "tournament": tournament_name,
                 "match": f"{event.home_team.name} vs {event.away_team.name}",
                 "time": start_time,
-                "teams_of_interest": ", ".join(sorted(list(set(target_teams_involved))))
             })
+            
+    # Sort fixtures by tournament name for readability
+    filtered_fixtures.sort(key=lambda f: f['tournament'])
 
     return filtered_fixtures
 
@@ -199,34 +171,43 @@ if __name__ == '__main__':
         for region in Category:
             logger.info(f"Processing region: {region.name} (ID: {region.value})")
 
-            fixtures = get_top_bottom_daily_fixtures(client, region, date_str='today')
-
+            # **Now only calling the ALL Fixtures function**
+            all_fixtures = get_all_daily_fixtures(client, region, date_str='today')
+            
+            # --- CONSTRUCT MESSAGE FOR ALL FIXTURES ---
+            
             print("\n" + "=" * 60)
-            print(f"  DAILY FIXTURES FOR TOP 3 & LAST 3 TEAMS - REGION: {region.name.upper()}")
+            print(f"  ALL DAILY FIXTURES - REGION: {region.name.upper()}")
             print("=" * 60)
 
             header = f"⚽ Sofascore Daily Fixtures - {region.name.capitalize()} ⚽\n\n"
+            
+            full_list_body = f"*📅 All Fixtures for {region.name.capitalize()}:*\n"
 
-            if fixtures:
-                body = "*Matches Involving Top 3 or Last 3 Teams:*\n"
-                for f in fixtures:
-                    print(f"Tournament: {f['tournament']}")
-                    print(f"Match:      {f['match']}")
-                    print(f"Time:       {f['time']}")
-                    print(f"Involved:   {f['teams_of_interest']}")
+            if all_fixtures:
+                # Group by Tournament for better readability in the message
+                fixtures_by_tournament = {}
+                for f in all_fixtures:
+                    fixtures_by_tournament.setdefault(f['tournament'], []).append(f)
+
+                # Iterate through sorted tournaments for the Telegram message
+                for tournament_name, fixtures in fixtures_by_tournament.items():
+                    print(f"\nTournament: {tournament_name}")
+                    full_list_body += f"\n*🏆 {tournament_name}*\n"
+                    
+                    for f in fixtures:
+                        print(f"Match: {f['match']} @ {f['time']}")
+                        full_list_body += (
+                            f"  {f['match']} @ {f['time']}\n"
+                        )
                     print("-" * 50)
 
-                    body += (
-                        f"\n*🏆 {f['tournament']}*\n"
-                        f"  {f['match']} @ {f['time']}\n"
-                        f"  (Focus: {f['teams_of_interest']})"
-                    )
-                final_message = header + body
+                final_message = header + full_list_body
             else:
                 print("No relevant fixtures found for this region today.")
-                final_message = header + "No relevant fixtures found for this region today."
+                final_message = header + "No fixtures found for this region today."
 
-            # Send Telegram message only if chat_id and bot_token are provided
+            # Send Telegram message
             if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
                 send_telegram_message(
                     message=final_message,
