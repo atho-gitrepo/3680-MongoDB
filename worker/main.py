@@ -4,8 +4,6 @@ from typing import List, Dict, Any, Optional, Set
 import requests
 import os
 
-from dateutil import parser  # pip install python-dateutil
-
 # --- CORE PROJECT IMPORTS ---
 from esd.sofascore.client import SofascoreClient
 from esd.sofascore.types import Event, Standing, Tournament, Season, Team, Category
@@ -42,10 +40,20 @@ def parse_event_time(start_time) -> str:
     """
     if not start_time:
         return 'N/A'
+
+    # If start_time is a callable property, call it
+    if callable(start_time):
+        try:
+            start_time = start_time()
+        except Exception:
+            return 'N/A'
+
     if isinstance(start_time, datetime.datetime):
         return start_time.strftime("%H:%M")
+
+    # Attempt ISO parsing without external libraries
     try:
-        dt = parser.isoparse(str(start_time))
+        dt = datetime.datetime.fromisoformat(str(start_time))
         return dt.strftime("%H:%M")
     except Exception:
         return 'N/A'
