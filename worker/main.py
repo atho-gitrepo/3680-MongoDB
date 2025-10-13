@@ -6,7 +6,6 @@ import os
 
 # --- CORE PROJECT IMPORTS ---
 from esd.sofascore.client import SofascoreClient
-# Note: Removed 'Standing' import as it's no longer used by any function here
 from esd.sofascore.types import Event, Tournament, Season, Category 
 from esd.utils import get_today
 
@@ -19,7 +18,6 @@ logger = logging.getLogger(__name__)
 def get_current_season_id(service: Any, tournament_id: int) -> Optional[int]:
     """
     Finds the ID of the current (or most recent) season for a given tournament.
-    (Kept in case it's used elsewhere, but not used by get_all_daily_fixtures)
     """
     try:
         seasons: List[Season] = service.get_tournament_seasons(tournament_id)
@@ -61,9 +59,6 @@ def parse_event_time(start_time) -> str:
         return 'N/A'
 
 
-# NOTE: get_top_bottom_daily_fixtures has been REMOVED.
-
-
 # ######################################################################
 # ### CORE FUNCTION: Get ALL Daily Fixtures for a Region
 # ######################################################################
@@ -85,7 +80,6 @@ def get_all_daily_fixtures(client: Any, category_enum: Category, date_str: str =
             logger.info(f"No tournaments found for category: {category_enum.name}")
             return []
             
-        # Collect IDs for filtering
         target_tournament_ids: Set[int] = {t.id for t in tournaments if hasattr(t, 'id')}
         logger.info(f"Identified {len(target_tournament_ids)} tournaments in category {category_enum.name}.")
 
@@ -93,21 +87,24 @@ def get_all_daily_fixtures(client: Any, category_enum: Category, date_str: str =
         logger.error(f"Error fetching tournaments for all fixtures: {e}")
         return []
 
-    # 2. Get all events for the specified date (using the fixed date calling)
+    # 2. Get all events for the specified date
+    # 🌟 CRITICAL FIX: ENSURE get_today() IS CALLED.
     date_to_fetch = get_today() if date_str == 'today' else date_str
+    
     try:
+        # client.get_events is likely the method throwing the 'function' format error
         daily_events: List[Event] = client.get_events(date_to_fetch)
         if not daily_events:
             logger.info(f"No events found for date {date_to_fetch}")
             return []
     except Exception as e:
+        # Log the error again for clarity
         logger.error(f"Failed to get all events for date {date_to_fetch}: {e}")
         return []
 
     # 3. Filter and format results
     filtered_fixtures = []
     for event in daily_events:
-        # Assuming event has a tournament ID associated with it
         tournament_id = getattr(event, 'tournament_id', None) 
 
         if tournament_id in target_tournament_ids:
@@ -120,7 +117,6 @@ def get_all_daily_fixtures(client: Any, category_enum: Category, date_str: str =
                 "time": start_time,
             })
             
-    # Sort fixtures by tournament name for readability
     filtered_fixtures.sort(key=lambda f: f['tournament'])
 
     return filtered_fixtures
@@ -150,6 +146,7 @@ def send_telegram_message(message: str, chat_id: str, bot_token: str):
         response.raise_for_status()
         logging.info("Telegram message sent successfully.")
     except requests.exceptions.RequestException as e:
+        # Also log Telegram Bad Request errors (400) like the one you saw in the logs
         logging.error(f"Telegram request failed: {e}")
 
 
@@ -171,7 +168,6 @@ if __name__ == '__main__':
         for region in Category:
             logger.info(f"Processing region: {region.name} (ID: {region.value})")
 
-            # **Now only calling the ALL Fixtures function**
             all_fixtures = get_all_daily_fixtures(client, region, date_str='today')
             
             # --- CONSTRUCT MESSAGE FOR ALL FIXTURES ---
@@ -185,7 +181,7 @@ if __name__ == '__main__':
             full_list_body = f"*📅 All Fixtures for {region.name.capitalize()}:*\n"
 
             if all_fixtures:
-                # Group by Tournament for better readability in the message
+                # Group by Tournament for better readability
                 fixtures_by_tournament = {}
                 for f in all_fixtures:
                     fixtures_by_tournament.setdefault(f['tournament'], []).append(f)
