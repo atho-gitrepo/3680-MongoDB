@@ -6,7 +6,8 @@ import os
 
 # --- CORE PROJECT IMPORTS ---
 from esd.sofascore.client import SofascoreClient
-from esd.sofascore.types import Event, Standing, Tournament, Season, Team, Category
+# Assuming these types are from your project, using the updated Standing type
+from esd.sofascore.types import Event, Standing, Tournament, Season, Team, Category 
 from esd.utils import get_today
 
 logger = logging.getLogger(__name__)
@@ -90,10 +91,13 @@ def get_top_bottom_daily_fixtures(client: Any, category_enum: Category, date_str
 
         try:
             standings_groups: List[Standing] = service.get_tournament_standings(t.id, season_id)
+            # The standing check is simplified here as the Standings class now uses List[StandingItem]
+            # but we keep the spirit of the original check to handle empty lists or missing items attribute.
             if not standings_groups or not hasattr(standings_groups[0], 'items') or not standings_groups[0].items:
                 logger.warning(f"No standings available for {t.name}. Skipping.")
                 continue
         except Exception as e:
+            # This is where the original 'standings' error was caught, now better handled
             logger.warning(f"Skipping {t.name} due to standings error: {e}")
             continue
 
@@ -103,20 +107,25 @@ def get_top_bottom_daily_fixtures(client: Any, category_enum: Category, date_str
         bottom_teams = standing_items[-3:] if num_teams >= 3 else standing_items
 
         for row in top_teams + bottom_teams:
-            if hasattr(row, 'team') and hasattr(row.team, 'id'):
+            # We assume row.team is not None based on the parse_standing_item logic
+            if hasattr(row, 'team') and hasattr(row.team, 'id') and row.team.id is not None:
+                # Need to check for None because the StandingItem fix uses Optional[int] for team ID
                 target_team_ids.add(row.team.id)
 
     logger.info(f"Identified {len(target_team_ids)} unique teams in category {category_enum.name}.")
 
     # 3. Get all events for the specified date
+    # 🌟 FIX APPLIED: CALL get_today() 🌟
     date_to_fetch = get_today() if date_str == 'today' else date_str
+    
     try:
         daily_events: List[Event] = client.get_events(date_to_fetch)
         if not daily_events:
             logger.info(f"No events found for date {date_to_fetch}")
             return []
     except Exception as e:
-        logger.error(f"Failed to get events for date {date_to_fetch}: {e}")
+        # This error is now clearer as date_to_fetch is a string
+        logger.error(f"Failed to get events for date {date_to_fetch}: {e}") 
         return []
 
     # 4. Filter and format results
