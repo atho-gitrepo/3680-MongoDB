@@ -6,6 +6,7 @@ google-cloud-firestore
 firebase-admin
 esd
 playwright
+python-dateutil>=2.8.2
 firebase-admin
 pymongo
 dnspython
