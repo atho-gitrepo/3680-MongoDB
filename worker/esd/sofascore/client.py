@@ -1,10 +1,9 @@
-# esd/sofascore/client.py
-
 """
 Sofascore client module
 """
 
 import logging
+from typing import callable # <--- ADDED THIS IMPORT for the type check
 from .service import SofascoreService
 from .types import (
     Event,
@@ -58,8 +57,6 @@ class SofascoreClient:
     def get_events(self, date: str = 'today', live: bool = False) -> list[Event]:
         """
         Get events for a specific date or all live events.
-        
-        Note: Removed self.initialize() call. Client is expected to be initialized before call.
         """
         if not self.service:
             self.logger.error("Service not initialized. Cannot fetch events.")
@@ -67,13 +64,26 @@ class SofascoreClient:
             
         if live:
             return self.service.get_live_events()
+            
+        # 🌟 CRITICAL FIX: Ensure the 'date' argument is a string, not a function object.
+        if callable(date):
+            self.logger.warning("Received a callable object as 'date'. Calling it to get string date.")
+            try:
+                date = date() # Call the function (e.g., get_today())
+            except Exception as e:
+                self.logger.error(f"Error calling function passed as date: {e}")
+                return []
+        
+        # If 'today' is passed, it should have been resolved by the caller (main.py) to get_today(),
+        # but if it somehow still contains the string 'today', we can let the service handle it 
+        # or rely on the caller's logic. Since the error is specifically 'function' object, 
+        # the callable check is the key.
+        
         return self.service.get_events(date)
 
     def search(self, query: str, entity: EntityType = EntityType.ALL) -> list[Event | Team | Player | Tournament]:
         """
         Search query for matches, teams, players, and tournaments.
-        
-        Note: Removed self.initialize() call. Client is expected to be initialized before call.
         """
         if not self.service:
             self.logger.error("Service not initialized. Cannot search.")
@@ -84,8 +94,6 @@ class SofascoreClient:
     def get_event(self, event_id: int) -> Event:
         """
         Get the event information.
-        
-        Note: Removed self.initialize() call. Client is expected to be initialized before call.
         """
         if not self.service:
             self.logger.error("Service not initialized. Cannot get event.")
@@ -96,16 +104,13 @@ class SofascoreClient:
     def get_player(self, player_id: int) -> Player:
         """
         Get the player information.
-        
-        Note: Removed self.initialize() call. Client is expected to be initialized before call.
         """
         if not self.service:
             self.logger.error("Service not initialized. Cannot get player.")
             return None
             
         return self.service.get_player(player_id)
-
+        
     # Note: Other methods (get_team, get_tournament_standings, etc.) should also 
     # have their redundant 'self.initialize()' calls removed, following the pattern above.
     # The fix is demonstrated in the core methods used by bot.py.
-
