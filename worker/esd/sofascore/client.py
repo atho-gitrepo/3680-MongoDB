@@ -3,7 +3,9 @@ Sofascore client module
 """
 
 import logging
-from typing import callable # <--- ADDED THIS IMPORT for the type check
+# REMOVE: from typing import callable 
+# 'callable' is a built-in function, not a member of the typing module.
+
 from .service import SofascoreService
 from .types import (
     Event,
@@ -65,7 +67,7 @@ class SofascoreClient:
         if live:
             return self.service.get_live_events()
             
-        # 🌟 CRITICAL FIX: Ensure the 'date' argument is a string, not a function object.
+        # ✅ FIX: Use the built-in callable() without importing it.
         if callable(date):
             self.logger.warning("Received a callable object as 'date'. Calling it to get string date.")
             try:
@@ -73,11 +75,6 @@ class SofascoreClient:
             except Exception as e:
                 self.logger.error(f"Error calling function passed as date: {e}")
                 return []
-        
-        # If 'today' is passed, it should have been resolved by the caller (main.py) to get_today(),
-        # but if it somehow still contains the string 'today', we can let the service handle it 
-        # or rely on the caller's logic. Since the error is specifically 'function' object, 
-        # the callable check is the key.
         
         return self.service.get_events(date)
 
@@ -110,7 +107,3 @@ class SofascoreClient:
             return None
             
         return self.service.get_player(player_id)
-        
-    # Note: Other methods (get_team, get_tournament_standings, etc.) should also 
-    # have their redundant 'self.initialize()' calls removed, following the pattern above.
-    # The fix is demonstrated in the core methods used by bot.py.
