@@ -1,94 +1,298 @@
 # /app/worker/bot.py
 
-import logging
-import time
+import requests
 import os
-import datetime
+import json
+import time
+import logging
+from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 
-# CRITICAL FIX: Import the requests library for the send_telegram function
-import requests 
+# --- Firebase Imports ---
+import firebase_admin
+from firebase_admin import credentials, firestore
 
-# Import services and types from your project
+# --- Sofascore Imports ---
+# Correct import structure for your local library
 from esd.sofascore import (
     SofascoreClient, 
     EntityType, 
+    # 🟢 NEW: Import the team stats types for average goal logic
     TeamTournamentStats,
     parse_team_tournament_stats,
     Event
-)
-
-# --- Configuration ---
-
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-TIME_BETWEEN_CYCLES = int(os.getenv("TIME_BETWEEN_CYCLES", 60))
-
-# Betting configuration
-MIN_TOTAL_AVERAGE_GOALS = float(os.getenv("MIN_TOTAL_AVERAGE_GOALS", 3.0)) 
-
-# Global state
-logger = logging.getLogger(__name__)
-sofascore_client: Optional[SofascoreClient] = None
-# A simple dictionary to track matches that have already been signaled
-tracked_matches: Dict[int, bool] = {}
-
-# --- Utility Functions ---
-
-def send_telegram(message: str):
-    """
-    Sends a message to the configured Telegram chat.
-    """
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        logger.error("Telegram credentials (TOKEN or CHAT_ID) are missing. Cannot send message.")
-        return
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    data = {
-        'chat_id': TELEGRAM_CHAT_ID,
-        'text': message,
-        'parse_mode': 'Markdown'
-    }
-    
-    try:
-        response = requests.post(url, data=data, timeout=10)
-        response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
-        logger.info(f"Telegram message sent successfully.")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Failed to send Telegram message: {e}")
-    except Exception as e:
-        logger.error(f"An unexpected error occurred while sending Telegram message: {e}")
+) 
 
 
-def is_amateur_or_youth_league(event: Event) -> bool:
-    """
-    Checks if an event belongs to a league that should be skipped (e.g., amateur, youth, or reserves).
-    """
-    skip_keywords = [
-        'reserve', 'u1', 'u2', 'youth', 'amateur', 'friendly game',
-        'landesliga', 'regionalliga', 'oberliga', 'liga 3', 'liga 4', 'cup',
-        'test match', 'division one', 'division two', 'division three',
-        'division four', 'division five', 'division six',
-        'cup, women', 'club friendly'
+# --- GLOBAL VARIABLES ---
+SOFASCORE_CLIENT = None 
+firebase_manager = None 
+# 🟢 ENHANCEMENT: New in-memory store for tracking live match state
+LOCAL_TRACKED_MATCHES = {} 
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("bot.log"),
+        logging.StreamHandler()
     ]
-    
-    # Combine relevant names into a single lower-case string for checking
-    event_str = f"{event.tournament.name.lower()} {event.country.name.lower()} {event.home_team.name.lower()} {event.away_team.name.lower()}"
-    
-    for keyword in skip_keywords:
-        if keyword in event_str:
-            logger.info(f"Skipping amateur/youth league based on keyword found in: {event_str}")
-            return True
-    return False
+)
+logger = logging.getLogger("FootballBettingBot")
 
-# --- Core Logic Functions ---
+# Load environment variables
+API_KEY = os.getenv("API_KEY") 
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+FIREBASE_CREDENTIALS_JSON_STRING = os.getenv("FIREBASE_CREDENTIALS_JSON")
+
+# --- CONSTANTS ---
+SLEEP_TIME = 60
+FIXTURE_API_INTERVAL = 900
+MINUTES_REGULAR_BET = [36, 37]
+BET_TYPE_REGULAR = 'regular'
+STATUS_LIVE = ['LIVE', '1H', '2H', 'ET', 'P']
+STATUS_HALFTIME = 'HT'
+STATUS_FINISHED = ['FT', 'AET', 'PEN'] 
+MAX_FETCH_RETRIES = 3 
+BET_RESOLUTION_WAIT_MINUTES = 180 
+
+# --- 🟢 AVERAGE GOAL FILTER CONSTANT ---
+MIN_TOTAL_AVERAGE_GOALS = float(os.getenv("MIN_TOTAL_AVERAGE_GOALS", 3.0)) 
+# --------------------------------------
+
+# --- 🟢 UPDATED FILTER CONSTANTS (USER COUNT REMOVED) ---
+AMATEUR_KEYWORDS = [
+    'amateur', 'youth', 'reserve', 'friendly', 'u23', 'u21', 'u19', 
+    'liga de reservas', 'division b', 'm-league', 'liga pro','u17'
+]
+# -------------------------------
+
+# =========================================================
+# 📌 INITIALIZATION FUNCTIONS
+# =========================================================
+
+class FirebaseManager:
+    """Manages all interactions with the Firebase Firestore database."""
+    def __init__(self, credentials_json_string):
+        self.db = None
+        # Initialize an empty cache for quick local lookups within one cycle
+        self._unresolved_bets_cache = {} 
+        try:
+            logger.info("Initializing Firebase...")
+            if not credentials_json_string:
+                logger.warning("FIREBASE_CREDENTIALS_JSON is empty. Skipping Firebase initialization.")
+                return
+
+            cred_dict = json.loads(credentials_json_string)
+            cred = credentials.Certificate(cred_dict)
+            if not firebase_admin._apps:
+                firebase_admin.initialize_app(cred)
+            self.db = firestore.client()
+            logger.info("Firebase initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize Firebase: {e}")
+            self.db = None
+            raise
+    
+    # --- EFFICIENT LOOKUP METHODS (OPTIMIZED) ---
+    def is_bet_unresolved(self, match_id: int or str) -> bool:
+        """Checks for an unresolved bet using a direct document lookup."""
+        if not self.db: return False
+        match_id_str = str(match_id)
+        
+        # 1. Check local cache first (for speed within the same bot cycle)
+        if match_id_str in self._unresolved_bets_cache:
+            return True
+            
+        # 2. Perform a direct Firestore lookup (minimal read operation)
+        try:
+            doc_ref = self.db.collection('unresolved_bets').document(match_id_str)
+            doc = doc_ref.get() # Single document read (1 read operation)
+            if doc.exists:
+                # Update cache if found in Firestore
+                self._unresolved_bets_cache[match_id_str] = doc.to_dict()
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Firestore Error during is_bet_unresolved: {e}")
+            return False
+
+    def get_unresolved_bet_data(self, match_id: int or str) -> dict or None:
+        """Retrieves an unresolved bet's data."""
+        if not self.db: return None
+        match_id_str = str(match_id)
+
+        # 1. Check local cache first
+        if match_id_str in self._unresolved_bets_cache:
+            return self._unresolved_bets_cache.get(match_id_str)
+
+        # 2. Perform a direct Firestore lookup (minimal read operation)
+        try:
+            doc_ref = self.db.collection('unresolved_bets').document(match_id_str)
+            doc = doc_ref.get()
+            if doc.exists:
+                data = doc.to_dict()
+                # Update cache and return
+                self._unresolved_bets_cache[match_id_str] = data
+                return data
+            return None
+        except Exception as e:
+            logger.error(f"Firestore Error during get_unresolved_bet_data: {e}")
+            return None
+    # --- END EFFICIENT LOOKUP METHODS ---
+            
+    def get_stale_unresolved_bets(self, minutes_to_wait=BET_RESOLUTION_WAIT_MINUTES):
+        if not self.db: return {}
+        try:
+            # Performs a full scan, but runs only once every FIXTURE_API_INTERVAL (~15 min)
+            bets = self.db.collection('unresolved_bets').stream()
+            stale_bets = {}
+            time_threshold = datetime.utcnow() - timedelta(minutes=minutes_to_wait)
+            
+            for doc in bets:
+                bet_info = doc.to_dict()
+                
+                # Check for bet types that need final resolution (currently only 32_over is blocked)
+                # Since the regular bet resolves at HT, we only need to check bets that persist past HT.
+                if bet_info.get('bet_type') not in [BET_TYPE_REGULAR]:
+                    placed_at_str = bet_info.get('placed_at')
+                    if placed_at_str:
+                        try:
+                            placed_at_dt = datetime.strptime(placed_at_str, '%Y-%m-%d %H:%M:%S')
+                            if placed_at_dt < time_threshold:
+                                stale_bets[doc.id] = bet_info
+                        except ValueError:
+                            logger.warning(f"Could not parse placed_at timestamp for bet {doc.id}")
+                            continue
+            return stale_bets
+        except Exception as e:
+            logger.error(f"Firestore Error during get_stale_unresolved_bets: {e}")
+            return {}
+
+    def add_unresolved_bet(self, match_id, data):
+        if not self.db: return
+        match_id_str = str(match_id)
+        try:
+            data['placed_at'] = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+            self.db.collection('unresolved_bets').document(match_id_str).set(data)
+            # Update cache when a bet is added
+            self._unresolved_bets_cache[match_id_str] = data 
+        except Exception as e:
+            logger.error(f"Firestore Error during add_unresolved_bet: {e}")
+
+    def move_to_resolved(self, match_id, bet_info, outcome):
+        if not self.db: return False
+        match_id_str = str(match_id)
+        try:
+            resolved_data = {
+                **bet_info,
+                'outcome': outcome,
+                'resolved_at': datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
+                'resolution_timestamp': firestore.SERVER_TIMESTAMP
+            } 
+            self.db.collection('resolved_bets').document(match_id_str).set(resolved_data)
+            self.db.collection('unresolved_bets').document(match_id_str).delete()
+            # Clear from cache when a bet is resolved
+            self._unresolved_bets_cache.pop(match_id_str, None) 
+            return True
+        except Exception as e:
+            logger.error(f"Firestore Error during move_to_resolved: {e}")
+            return False
+
+    def get_last_api_call(self):
+        if not self.db: return None
+        try:
+            doc = self.db.collection('config').document('api_tracker').get()
+            data = doc.to_dict()
+            if data and 'last_resolution_api_call' in data:
+                return data['last_resolution_api_call']
+            return None
+        except Exception as e:
+            logger.error(f"Firestore Error during get_last_api_call: {e}")
+            return None
+
+    def update_last_api_call(self):
+        if not self.db: return
+        try:
+            timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+            self.db.collection('config').document('api_tracker').set({
+                'last_resolution_api_call': timestamp
+            }, merge=True)
+        except Exception as e:
+            logger.error(f"Firestore Error during update_last_api_call: {e}")
+
+
+def initialize_sofascore_client():
+    """
+    Initializes and sets the global SOFASCORE_CLIENT object.
+    """
+    global SOFASCORE_CLIENT
+    
+    if SOFASCORE_CLIENT is not None: 
+        logger.info("Sofascore client already initialized.")
+        return True 
+
+    logger.info("Attempting to initialize Sofascore client...")
+    try:
+        # Assuming SofascoreClient is the wrapper for SofascoreService
+        SOFASCORE_CLIENT = SofascoreClient()
+        SOFASCORE_CLIENT.initialize() 
+        logger.info("Sofascore client successfully initialized.")
+        return True
+    except Exception as e:
+        logger.critical(f"FATAL: SofascoreClient failed to initialize. Error: {e}", exc_info=True)
+        SOFASCORE_CLIENT = None
+        return False
+
+def initialize_bot_services():
+    """Initializes all external services (Firebase and Sofascore Client)."""
+    global firebase_manager
+
+    logger.info("Initializing Football Betting Bot services...")
+    
+    # 1. Initialize Firebase Manager
+    try:
+        firebase_manager = FirebaseManager(FIREBASE_CREDENTIALS_JSON_STRING)
+    except Exception:
+        logger.critical("Bot cannot proceed. Firebase initialization failed.")
+        return False
+        
+    if firebase_manager is None or not firebase_manager.db:
+         logger.critical("Bot cannot proceed. Firebase initialization failed.")
+         return False
+
+    # 2. Initialize the Sofascore Client
+    if not initialize_sofascore_client():
+        logger.critical("Bot cannot proceed. Sofascore client initialization failed.")
+        return False
+        
+    logger.info("All bot services initialized successfully.")
+    send_telegram("🚀 Football Betting Bot Initialized Successfully! Starting monitoring.")
+    return True
+    
+def shutdown_bot():
+    """Closes the Sofascore client resources gracefully. Crucial for Playwright stability."""
+    global SOFASCORE_CLIENT
+    if SOFASCORE_CLIENT:
+        SOFASCORE_CLIENT.close()
+        logger.info("Sofascore Client resources closed.")
+
+# =========================================================
+# 🟢 NEW/MODIFIED AVERAGE GOALS FUNCTIONS
+# =========================================================
 
 def _get_team_stats_safely(team_id: int, tournament_id: int) -> TeamTournamentStats:
     """
     Fetches, parses, and returns TeamTournamentStats, logging errors safely.
     Returns an empty TeamTournamentStats object if fetching fails.
     """
-    raw_stats = sofascore_client.get_team_tournament_stats(team_id, tournament_id)
+    if not SOFASCORE_CLIENT:
+        logger.error("Client not initialized. Cannot fetch team stats.")
+        return TeamTournamentStats(team_id=team_id, tournament_id=tournament_id)
+        
+    raw_stats = SOFASCORE_CLIENT.get_team_tournament_stats(team_id, tournament_id)
     if raw_stats:
         return parse_team_tournament_stats(team_id, tournament_id, raw_stats)
     
@@ -97,28 +301,14 @@ def _get_team_stats_safely(team_id: int, tournament_id: int) -> TeamTournamentSt
     return TeamTournamentStats(team_id=team_id, tournament_id=tournament_id)
 
 
-def _process_event_for_betting(event: Event) -> Optional[str]:
+def _apply_average_goals_filter(event: Event) -> Optional[Dict[str, float]]:
     """
-    Applies all betting filters to a single event.
+    Calculates combined average goals and returns the stats if the filter passes.
 
     Returns:
-        Optional[str]: A formatted Telegram message if a signal is found, otherwise None.
+        Optional[Dict]: Dictionary containing 'home_avg', 'away_avg', 'total_avg' if passes, else None.
     """
-    global tracked_matches
-
-    # 1. Skip previously tracked and currently tracked matches
-    if event.id in tracked_matches:
-        return None
-    
-    # 2. Skip amateur/youth leagues
-    if is_amateur_or_youth_league(event):
-        return None
-
-    # 3. Apply Time/Status Filters (Example)
-    # This is where you would put filters like: time > 15 min, score = 0-0, etc.
-    # For now, we'll assume any fetched event is "trackable" if it passes league filters.
-    
-    # 4. Fetch Average Goal Stats
+    # 1. Fetch Average Goal Stats
     
     # Home Team Stats
     home_stats = _get_team_stats_safely(
@@ -132,115 +322,410 @@ def _process_event_for_betting(event: Event) -> Optional[str]:
         tournament_id=event.tournament.id
     )
     
-    # 5. Apply Average Goal Filter
-    
-    # Calculate the total average goals across both teams (Scored + Conceded for Home, Scored + Conceded for Away)
+    # Calculate the total average goals across both teams
     total_avg_goals = home_stats.total_average_goals + away_stats.total_average_goals
     
     logger.info(
-        f"Event {event.id}: {event.home_team.name} vs {event.away_team.name} | "
+        f"Avg Goal Check: {event.home_team.name} vs {event.away_team.name} | "
         f"Home Avg: {home_stats.total_average_goals:.2f} | "
         f"Away Avg: {away_stats.total_average_goals:.2f} | "
-        f"Combined Avg: {total_avg_goals:.2f}"
+        f"Combined Avg: {total_avg_goals:.2f} (Min: {MIN_TOTAL_AVERAGE_GOALS:.2f})"
     )
 
     if total_avg_goals >= MIN_TOTAL_AVERAGE_GOALS:
-        # Signal found!
-        tracked_matches[event.id] = True # Mark as tracked
-        
-        message = (
-            f"⚽️ *BETTING SIGNAL FOUND* ⚽️\n"
-            f"🏆 {event.tournament.name} ({event.country.name})\n"
-            f"🆚 *{event.home_team.name}* vs *{event.away_team.name}*\n"
-            f"⏱ Current Time: {event.time.current_minute}' | Score: {event.score.home}:{event.score.away}\n\n"
-            
-            f"📊 *AVERAGE GOALS (Scored + Conceded)*\n"
-            f"• *{event.home_team.name}* (Home): {home_stats.total_average_goals:.2f}\n"
-            f"• *{event.away_team.name}* (Away): {away_stats.total_average_goals:.2f}\n"
-            f"• *Combined Total Avg*: {total_avg_goals:.2f}\n\n"
-            
-            f"✅ *SIGNAL REASON*: Combined Avg Goals $\\geq$ {MIN_TOTAL_AVERAGE_GOALS:.2f} (Actual: {total_avg_goals:.2f})"
-        )
-        return message
+        return {
+            'home_avg': home_stats.total_average_goals,
+            'away_avg': away_stats.total_average_goals,
+            'total_avg': total_avg_goals,
+        }
 
     return None
 
+# =========================================================
+# 🏃 CORE LOGIC FUNCTIONS
+# =========================================================
 
-def run_bot_cycle():
-    """
-    The main execution cycle for the betting bot.
-    """
-    logger.info("Starting bot cycle...")
-    
-    try:
-        # 1. Fetch live events
-        live_matches: List[Event] = sofascore_client.get_live_events()
-        logger.info(f"Fetched {len(live_matches)} live matches.")
-
-        # 2. Iterate and process each event
-        for event in live_matches:
-            message = _process_event_for_betting(event)
-            if message:
-                send_telegram(message)
-                
-    except Exception as e:
-        logger.error(f"An error occurred during the bot cycle: {e}", exc_info=True)
-        send_telegram(f"❌ *Bot Cycle Error*: An unexpected error occurred: `{str(e)}`")
-
-    # 3. Cleanup and reporting
-    logger.info(f"Bot cycle completed. Currently tracking {len(tracked_matches)} matches locally.")
-
-
-def initialize_bot_services() -> bool:
-    """
-    Initializes the SofaScore client and other services.
-    """
-    global sofascore_client
-    
-    logger.info("Initializing Football Betting Bot services...")
-    
-    # 1. Initialize Firebase (Placeholder, if you add database later)
-    logger.info("Initializing Firebase...")
-    # ... Firebase init logic here ...
-    logger.info("Firebase initialized successfully")
-    
-    # 2. Initialize Sofascore Client
-    logger.info("Attempting to initialize Sofascore client...")
-    try:
-        # You may need to pass a browser path if Playwright is not finding it
-        sofascore_client = SofascoreClient() 
-        logger.info("Sofascore client successfully initialized.")
-    except Exception as e:
-        logger.error(f"Failed to initialize Sofascore client: {e}")
-        send_telegram(f"🔥 *FATAL ERROR*: Failed to initialize Sofascore client on startup: `{str(e)}`")
+def send_telegram(msg, max_retries=3):
+    """Send Telegram message with retry mechanism"""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.warning(f"Telegram credentials missing. Message not sent: {msg}")
         return False
+        
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    # Use Markdown for richer presentation
+    data = {'chat_id': TELEGRAM_CHAT_ID, 'text': msg, 'parse_mode': 'Markdown'} 
+    
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(url, data=data, timeout=10)
+            if response.status_code == 200:
+                return True
+            else:
+                logger.error(f"Telegram error (attempt {attempt + 1}): {response.status_code} - {response.text}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network Error sending Telegram message (attempt {attempt + 1}): {e}")
+        
+        if attempt < max_retries - 1:
+            time.sleep(2 ** attempt)
+    
+    return False
 
-    logger.info("All bot services initialized successfully.")
-    send_telegram("🚀 Football Betting Bot Initialized Successfully! Starting monitoring.")
-    return True
-
-# --- Main Loop (If you run bot.py directly) ---
-
-def main():
+def get_live_matches():
+    """Fetch ONLY live matches using the Sofascore client."""
+    if not SOFASCORE_CLIENT:
+        logger.error("Sofascore client is not initialized.")
+        return []
+    try:
+        # Note: SOFASCORE_CLIENT.get_events(live=True) calls the service method
+        live_events = SOFASCORE_CLIENT.get_events(live=True) 
+        logger.info(f"Fetched {len(live_events)} live matches.")
+        return live_events
+    except Exception as e:
+        logger.error(f"Sofascore API Error fetching live matches: {e}")
+        return []
+        
+def get_finished_match_details(sofascored_id):
     """
-    Main loop for continuous execution.
+    Fetches the full event details for a match ID using the active Sofascore client.
     """
-    if not initialize_bot_services():
-        logger.error("Bot services failed to initialize. Exiting.")
+    if not SOFASCORE_CLIENT: 
+        logger.error("Sofascore client is not initialized.")
+        return None
+    
+    sofascored_id = int(sofascored_id) 
+    
+    try:
+        match_data = SOFASCORE_CLIENT.get_event(sofascored_id)
+        
+        # Check if the returned object is the correct type and has the ID
+        if match_data and match_data.id == sofascored_id:
+            return match_data
+        
+        logger.warning(f"Failed to fetch event {sofascored_id} via get_event. Returned data was invalid or mismatched ID.")
+        return None
+        
+    except Exception as e:
+        # Log the specific error from the API call
+        logger.error(f"Sofascore Client Error fetching finished event {sofascored_id}: {e}")
+        return None
+
+def robust_get_finished_match_details(sofascored_id):
+    """
+    Wrapper to attempt fetching match details with retries and client refresh on persistent failure.
+    """
+    global SOFASCORE_CLIENT
+    
+    for attempt in range(MAX_FETCH_RETRIES):
+        result = get_finished_match_details(sofascored_id)
+        if result:
+            if attempt > 0:
+                logger.info(f"Successfully fetched {sofascored_id} on attempt {attempt + 1}.")
+            return result
+        
+        if attempt == MAX_FETCH_RETRIES - 1:
+            logger.error(f"Permanent failure fetching {sofascored_id} after {MAX_FETCH_RETRIES} attempts. Attempting full client restart.")
+            try:
+                if SOFASCORE_CLIENT:
+                    SOFASCORE_CLIENT.close()
+                    SOFASCORE_CLIENT = None 
+                initialize_sofascore_client()
+                final_result = get_finished_match_details(sofascored_id)
+                if final_result:
+                    logger.info(f"Successfully fetched {sofascored_id} after client restart.")
+                    return final_result
+            except Exception as e:
+                logger.critical(f"FATAL: Client restart failed for {sofascored_id}: {e}")
+            
+        
+        logger.warning(f"Failed to fetch final data for Sofascore ID {sofascored_id}. Retrying in {2 ** attempt}s (Attempt {attempt + 1}/{MAX_FETCH_RETRIES}).")
+        time.sleep(2 ** attempt)
+        
+    return None
+
+def place_regular_bet(state, fixture_id, score, match_info, avg_goal_stats: Dict[str, float]):
+    """Handles placing the initial 36' bet."""
+    
+    # 🟢 OPTIMIZED: Use direct lookup instead of full collection scan
+    if firebase_manager.is_bet_unresolved(fixture_id):
+        logger.info(f"Regular bet already exists in 'unresolved_bets' for fixture {fixture_id}. Skipping placement and Telegram message.")
+        # Ensure the tracked state is marked as placed to stop re-checking in subsequent runs
+        if not state.get('36_bet_placed'):
+            state['36_bet_placed'] = True
+            # 🟢 MODIFIED: Update the local store
+            LOCAL_TRACKED_MATCHES[fixture_id] = state 
         return
 
-    while True:
-        try:
-            run_bot_cycle()
-        except KeyboardInterrupt:
-            logger.info("Bot stopped by user.")
-            break
-        except Exception as e:
-            logger.error(f"Error in main loop: {e}")
-            time.sleep(10) # Wait before restarting the loop on error
-        
-        logger.info(f"Sleeping for {SLEEP_TIME} seconds...")
-        time.sleep(SLEEP_TIME)
+    if score in ['1-1', '2-2', '3-3']:
+        state['36_bet_placed'] = True
+        state['36_score'] = score
+        # 🟢 MODIFIED: Update the local store
+        LOCAL_TRACKED_MATCHES[fixture_id] = state 
 
-if __name__ == '__main__':
-    main()
+        unresolved_data = {
+            'match_name': match_info['match_name'],
+            'placed_at': datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
+            'league': match_info['league_name'],
+            'country': match_info['country'],
+            'league_id': match_info['league_id'],
+            'bet_type': BET_TYPE_REGULAR,
+            '36_score': score,
+            'fixture_id': fixture_id,
+            'sofascored_id': fixture_id 
+        }
+        firebase_manager.add_unresolved_bet(fixture_id, unresolved_data)
+        
+        # 🟢 NEW: Include Avg Goal Info in the Telegram Message
+        message = (
+            f"⏱️ **36' - {match_info['match_name']}**\n"
+            f"🌍 {match_info['country']} | 🏆 {match_info['league_name']}\n"
+            f"🔢 Score: {score}\n"
+            f"🎯 Correct Score Bet Placed for Half Time\n\n"
+            
+            f"📊 *Avg Goals* (Combined $\\geq$ {MIN_TOTAL_AVERAGE_GOALS:.2f}):\n"
+            f"• *Home Avg*: {avg_goal_stats['home_avg']:.2f}\n"
+            f"• *Away Avg*: {avg_goal_stats['away_avg']:.2f}\n"
+            f"• *Total Avg*: {avg_goal_stats['total_avg']:.2f}"
+        )
+        send_telegram(message)
+    else:
+        state['36_bet_placed'] = True
+        # 🟢 MODIFIED: Update the local store
+        LOCAL_TRACKED_MATCHES[fixture_id] = state 
+
+
+def check_ht_result(state, fixture_id, score, match_info):
+    """Checks the result of all placed bets at halftime."""
+    
+    current_score = score
+    # 🟢 OPTIMIZED: Use targeted getter function
+    unresolved_bet_data = firebase_manager.get_unresolved_bet_data(fixture_id) 
+
+    if unresolved_bet_data:
+        bet_type = unresolved_bet_data.get('bet_type')
+        outcome = None
+        message = ""
+
+        # 🟢 Use corrected league/country info from the 'unresolved_bet_data' 
+        country_name = unresolved_bet_data.get('country', 'N/A') 
+        league_name = unresolved_bet_data.get('league', 'N/A')
+        
+        if bet_type == BET_TYPE_REGULAR:
+            bet_score = unresolved_bet_data.get('36_score', 'N/A')
+            outcome = 'win' if current_score == bet_score else 'loss'
+            
+            if outcome == 'win':
+                message = (
+                    f"✅ **HT Result: {match_info['match_name']}**\n"
+                    f"🌍 {country_name} | 🏆 {league_name}\n"
+                    f"🔢 HT Score: **{current_score}**\n"
+                    f"🎯 Bet Score: **{bet_score}**\n"
+                    f"🎉 36' Bet WON"
+                )
+            else:
+                message = (
+                    f"❌ **HT Result: {match_info['match_name']}**\n"
+                    f"🌍 {country_name} | 🏆 {league_name}\n"
+                    f"🔢 HT Score: **{current_score}**\n"
+                    f"🎯 Bet Score: **{bet_score}**\n"
+                    f"🔁 36' Bet LOST"
+                )
+            
+        if outcome:
+            firebase_manager.move_to_resolved(fixture_id, unresolved_bet_data, outcome)
+            send_telegram(message)
+    
+    # 🟢 MODIFIED: Clean up the local tracked match store
+    if not firebase_manager.is_bet_unresolved(fixture_id):
+        if fixture_id in LOCAL_TRACKED_MATCHES:
+            del LOCAL_TRACKED_MATCHES[fixture_id]
+            logger.info(f"Cleaned up local tracking for fixture {fixture_id}.")
+
+
+def process_live_match(match: Event):
+    """
+    Processes a single live match using the Sofascore object structure,
+    applying the Average Goals filter first.
+    """
+    fixture_id = str(match.id) # Ensure ID is string for dictionary key
+    
+    # 0. Apply Average Goals Filter (Skip early if the match doesn't meet the potential)
+    avg_goal_stats = _apply_average_goals_filter(match)
+    if avg_goal_stats is None:
+        return # Skip this match
+    
+    match_name = f"{match.home_team.name} vs {match.away_team.name}"
+
+    # =========================================================
+    # 🟢 AMATEUR TOURNAMENT FILTER LOGIC (KEYWORD ONLY)
+    # =========================================================
+    tournament = match.tournament
+    category_name = tournament.category.name if hasattr(tournament, 'category') and tournament.category else ''
+    
+    # Concatenate ALL relevant names into a single string for comprehensive filtering
+    full_filter_text = (
+        f"{tournament.name} "
+        f"{category_name} "
+        f"{match.home_team.name} "
+        f"{match.away_team.name}"
+    ).lower()
+
+    # 1. Check for keywords in the combined string (Country, League, and both Team Names)
+    if any(keyword in full_filter_text for keyword in AMATEUR_KEYWORDS):
+        
+        # 🟢 FIX: Move the .replace('\n', ' ') operation outside of the f-string's expression brackets.
+        cleaned_text = full_filter_text.replace('\n', ' ')
+        logger.info(f"Skipping amateur/youth league based on keyword found in: {cleaned_text}")
+        
+        return # Skip this match
+    # =========================================================
+
+    minute = match.total_elapsed_minutes 
+    status_description = match.status.description.upper()
+    status = 'N/A' 
+    
+    if '1ST HALF' in status_description: status = '1H'
+    elif '2ND HALF' in status_description: status = '2H'
+    elif 'HALFTIME' in status_description: status = STATUS_HALFTIME
+    elif 'FINISHED' in status_description or 'ENDED' in status_description or 'CANCELLED' in status_description: status = 'FT'
+    elif status_description in STATUS_LIVE: status = status_description
+
+    home_goals = match.home_score.current
+    away_goals = match.away_score.current
+    score = f"{home_goals}-{away_goals}"
+    
+    if status.upper() not in STATUS_LIVE and status.upper() != STATUS_HALFTIME: return
+    if minute is None and status.upper() not in [STATUS_HALFTIME]: return
+    
+    # 🟢 ENHANCEMENT: Use the global in-memory store instead of Firestore for tracked matches
+    state = LOCAL_TRACKED_MATCHES.get(fixture_id) or {
+        '36_bet_placed': False,
+        '36_score': None,
+    }
+    # 🟢 Store or update the initial/current state in the local store
+    LOCAL_TRACKED_MATCHES[fixture_id] = state
+
+    match_info = {
+        'match_name': match_name,
+        'league_name': tournament.name if hasattr(match, 'tournament') else 'N/A',
+        'country': tournament.category.name if hasattr(match, 'tournament') and hasattr(tournament, 'category') else 'N/A', 
+        'league_id': tournament.id if hasattr(match, 'tournament') else 'N/A'
+    }
+        
+    if status.upper() == '1H' and minute in MINUTES_REGULAR_BET and not state.get('36_bet_placed'):
+        # 🟢 Pass the avg_goal_stats dictionary to the betting function
+        place_regular_bet(state, fixture_id, score, match_info, avg_goal_stats)
+        
+    elif status.upper() == STATUS_HALFTIME and firebase_manager.is_bet_unresolved(fixture_id): # OPTIMIZED
+        # Only check HT result if an unresolved bet exists (to avoid unnecessary HT checks)
+        check_ht_result(state, fixture_id, score, match_info)
+        
+    # 🟢 MODIFIED: Clean up the local tracked match if it's finished and all bets are resolved/cleared
+    if status in STATUS_FINISHED and not firebase_manager.is_bet_unresolved(fixture_id): # OPTIMIZED
+        if fixture_id in LOCAL_TRACKED_MATCHES:
+            del LOCAL_TRACKED_MATCHES[fixture_id]
+            logger.info(f"Cleaned up local tracking for finished fixture {fixture_id}.")
+
+
+def check_and_resolve_stale_bets():
+    """
+    Checks and resolves old, unresolved bets by fetching their final status.
+    """
+    stale_bets = firebase_manager.get_stale_unresolved_bets(BET_RESOLUTION_WAIT_MINUTES)
+    if not stale_bets:
+        return
+    
+    last_call_str = firebase_manager.get_last_api_call()
+    last_call_dt = None
+    if last_call_str:
+        try:
+            last_call_dt = datetime.strptime(last_call_str, '%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            logger.warning("Could not parse last_resolution_api_call timestamp. Proceeding with API call.")
+
+    time_since_last_call = (datetime.utcnow() - last_call_dt).total_seconds() if last_call_dt else FIXTURE_API_INTERVAL + 1
+    
+    if time_since_last_call < FIXTURE_API_INTERVAL:
+        logger.info(f"Skipping FT resolution API call. Last call was {int(time_since_last_call)}s ago. Next in {int(FIXTURE_API_INTERVAL - time_since_last_call)}s.")
+        return
+
+    logger.info(f"Initiating FT resolution API calls for {len(stale_bets)} stale bets.")
+    successful_api_call = False
+    
+    for match_id, bet_info in stale_bets.items():
+        # Get the stored Sofascore ID for lookup
+        sofascored_id = bet_info.get('sofascored_id', match_id) 
+
+        # Use the robust fetcher with the Sofascore ID
+        match_data = robust_get_finished_match_details(sofascored_id)
+        
+        if not match_data:
+            logger.warning(f"Failed to fetch final data for fixture {match_id} (Sofascore ID: {sofascored_id}). Will retry on next interval.")
+            continue
+        
+        successful_api_call = True 
+
+        # Check the status from the reliably fetched match_data
+        status_description = match_data.status.description.upper()
+        
+        if 'FINISHED' in status_description or 'ENDED' in status_description:
+            # Use the final score from the reliably fetched match_data
+            # final_score = f"{match_data.home_score.current or 0}-{match_data.away_score.current or 0}"
+            # match_name = bet_info.get('match_name', f"Match {match_id}")
+            # bet_type = bet_info.get('bet_type', 'unknown')
+            
+            # 🟢 Retrieve the corrected info from Firebase
+            # country_name = bet_info.get('country', 'N/A') 
+            # league_name = bet_info.get('league', 'N/A') 
+            
+            outcome = None
+            message = ""
+
+            # Currently, only 'regular' bets resolve at HT. 
+            # If you unblock other bet types that resolve at FT, their resolution logic would go here.
+            
+            if outcome and outcome != 'error':
+                if send_telegram(message):
+                    firebase_manager.move_to_resolved(match_id, bet_info, outcome)
+                    # 🟢 MODIFIED: Clean up the local tracked match if it still exists
+                    if match_id in LOCAL_TRACKED_MATCHES:
+                        del LOCAL_TRACKED_MATCHES[match_id] 
+                    time.sleep(1)
+        
+        else:
+            logger.info(f"Match {match_id} is stale but not yet finished. Current status: {status_description}. Retrying later.")
+
+    if successful_api_call:
+        firebase_manager.update_last_api_call()
+        
+def run_bot_cycle():
+    """Run one complete cycle of the bot"""
+    logger.info("Starting bot cycle...")
+    
+    if not SOFASCORE_CLIENT or not firebase_manager or not firebase_manager.db:
+        logger.error("Services are not initialized. Skipping cycle.")
+        return
+        
+    live_matches = get_live_matches() 
+    
+    for match in live_matches:
+        process_live_match(match)
+    
+    check_and_resolve_stale_bets()
+    
+    logger.info(f"Bot cycle completed. Currently tracking {len(LOCAL_TRACKED_MATCHES)} matches locally.")
+
+if __name__ == "__main__":
+    if initialize_bot_services():
+        try:
+            while True:
+                run_bot_cycle()
+                logger.info(f"Sleeping for {SLEEP_TIME} seconds...")
+                time.sleep(SLEEP_TIME)
+        except KeyboardInterrupt:
+            logger.info("Bot shutting down due to user interrupt.")
+        except Exception as e:
+            logger.critical(f"FATAL UNHANDLED ERROR IN MAIN LOOP: {e}", exc_info=True)
+            send_telegram(f"❌ CRITICAL BOT ERROR: {e}. Check logs immediately!")
+        finally:
+            shutdown_bot()
+            logger.info("Bot terminated.")
