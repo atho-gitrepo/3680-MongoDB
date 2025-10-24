@@ -22,7 +22,7 @@ from .tournament import Tournament, parse_tournament, parse_tournaments
 from .season import Season, parse_seasons
 from .bracket import Bracket, parse_brackets
 from .standing import Standing, parse_standings
-from .top_tournamnet_teams import TopTournamentTeams, parse_top_tournament_teams
+from .top_tournament_teams import TopTournamentTeams, parse_top_tournament_teams
 from .top_tournament_players import TopTournamentPlayers, parse_top_tournament_players
 from .entity import EntityType
 from .categories import Category
