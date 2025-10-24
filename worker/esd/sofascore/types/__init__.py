@@ -13,7 +13,7 @@ from .manager import Manager, parse_manager
 from .transfer import TransferHistory, parse_transfer_history
 from .player_attributes import PlayerAttributes, parse_player_attributes
 from .match_stats import MatchStats, parse_match_stats
-from .lineups import Lineups, parse_lineups
+from .lineup import Lineups, parse_lineups
 from .incident import Incident, parse_incidents
 from .top_players_match import TopPlayersMatch, parse_top_players_match
 from .comment import Comment, parse_comments
