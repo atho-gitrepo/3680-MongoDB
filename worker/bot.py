@@ -239,8 +239,8 @@ def main():
             logger.error(f"Error in main loop: {e}")
             time.sleep(10) # Wait before restarting the loop on error
         
-        logger.info(f"Sleeping for {TIME_BETWEEN_CYCLES} seconds...")
-        time.sleep(TIME_BETWEEN_CYCLES)
+        logger.info(f"Sleeping for {SLEEP_TIME} seconds...")
+        time.sleep(SLEEP_TIME)
 
 if __name__ == '__main__':
     main()
