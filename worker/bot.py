@@ -17,7 +17,6 @@ from esd.sofascore import (
 
 # --- GLOBAL VARIABLES ---
 SOFASCORE_CLIENT = None 
-# 🟢 MODIFIED: LOCAL_TRACKED_MATCHES is the single source of truth for bet tracking
 LOCAL_TRACKED_MATCHES: Dict[str, Dict[str, Any]] = {} 
 
 # Set up logging
@@ -44,11 +43,11 @@ STATUS_HALFTIME = 'HT'
 STATUS_FINISHED = ['FT', 'AET', 'PEN'] 
 MAX_FETCH_RETRIES = 3 
 
-# --- 🟢 AVERAGE GOAL FILTER CONSTANT ---
+# --- 🟢 AVERAGE GOAL CONSTANT (Kept for reference/logging) ---
 MIN_TOTAL_AVERAGE_GOALS = float(os.getenv("MIN_TOTAL_AVERAGE_GOALS", 3.0)) 
 # --------------------------------------
 
-# --- FILTER CONSTANTS ---
+# --- FILTER CONSTANTS (Kept) ---
 AMATEUR_KEYWORDS = [
     'amateur', 'youth', 'reserve', 'friendly', 'u23', 'u21', 'u19', 
     'liga de reservas', 'division b', 'm-league', 'liga pro','u17'
@@ -76,7 +75,7 @@ def initialize_sofascore_client():
         # 1. Instantiate the Client (Lightweight)
         SOFASCORE_CLIENT = SofascoreClient()
         
-        # 2. 🟢 CRITICAL FIX: Explicitly start the underlying Playwright Service (Heavy)
+        # 2. Explicitly start the underlying Playwright Service (Heavy)
         SOFASCORE_CLIENT.initialize() 
         
         logger.info("Sofascore client successfully initialized and service is ready.")
@@ -97,7 +96,6 @@ def initialize_bot_services():
         return False
         
     logger.info("All bot services initialized successfully.")
-    # 🟢 Modified: Simplified startup message
     send_telegram("🚀 Football Betting Bot Initialized Successfully! Starting monitoring.")
     return True
     
@@ -119,21 +117,20 @@ def _get_team_stats_safely(team_id: int, tournament_id: int) -> TeamTournamentSt
     """
     if not SOFASCORE_CLIENT:
         logger.error("Client not initialized. Cannot fetch team stats.")
-        # Returning a TeamTournamentStats with zero goals on failure
         return TeamTournamentStats(team_id=team_id, tournament_id=tournament_id)
         
     raw_stats = SOFASCORE_CLIENT.get_team_tournament_stats(team_id, tournament_id)
     if raw_stats:
         return parse_team_tournament_stats(team_id, tournament_id, raw_stats)
     
-    # Return a zero-value stats object on failure
     logger.warning(f"Could not fetch raw stats for team {team_id} in tournament {tournament_id}. Returning empty stats.")
     return TeamTournamentStats(team_id=team_id, tournament_id=tournament_id)
 
 
-def _apply_average_goals_filter(event: Event) -> Optional[Dict[str, float]]:
+def _get_average_goal_stats(event: Event) -> Dict[str, float]:
     """
-    Calculates combined average goals and returns the stats if the filter passes.
+    Calculates combined average goals and returns the stats.
+    NOTE: This function performs CALCULATION only, not filtering.
     """
     # Home Team Stats
     home_stats = _get_team_stats_safely(
@@ -151,18 +148,17 @@ def _apply_average_goals_filter(event: Event) -> Optional[Dict[str, float]]:
     total_avg_goals = home_stats.total_average_goals + away_stats.total_average_goals
     
     logger.info(
-        f"Avg Goal Check: {event.home_team.name} vs {event.away_team.name} | "
-        f"Combined Avg: {total_avg_goals:.2f} (Min: {MIN_TOTAL_AVERAGE_GOALS:.2f})"
+        f"Avg Goal Calc: {event.home_team.name} vs {event.away_team.name} | "
+        f"Combined Avg: {total_avg_goals:.2f} (Min Ref: {MIN_TOTAL_AVERAGE_GOALS:.2f})"
     )
 
-    if total_avg_goals >= MIN_TOTAL_AVERAGE_GOALS:
-        return {
-            'home_avg': home_stats.total_average_goals,
-            'away_avg': away_stats.total_average_goals,
-            'total_avg': total_avg_goals,
-        }
+    # Return the stats
+    return {
+        'home_avg': home_stats.total_average_goals,
+        'away_avg': away_stats.total_average_goals,
+        'total_avg': total_avg_goals,
+    }
 
-    return None
 
 def send_telegram(msg, max_retries=3):
     """Send Telegram message with retry mechanism"""
@@ -189,7 +185,7 @@ def send_telegram(msg, max_retries=3):
     return False
 
 # =========================================================
-# 🏃 CORE LOGIC FUNCTIONS (MODIFIED FOR LOCAL STATE)
+# 🏃 CORE LOGIC FUNCTIONS
 # =========================================================
 
 def get_live_matches():
@@ -198,8 +194,6 @@ def get_live_matches():
         logger.error("Sofascore client is not initialized.")
         return []
     try:
-        # Note: SOFASCORE_CLIENT.get_events(live=True) calls get_live_events() 
-        # which checks service readiness inside the client.
         live_events = SOFASCORE_CLIENT.get_events(live=True) 
         logger.info(f"Fetched {len(live_events)} live matches.")
         return live_events
@@ -209,7 +203,10 @@ def get_live_matches():
 
 
 def place_regular_bet(state, fixture_id, score, match_info, avg_goal_stats: Dict[str, float]):
-    """Handles placing the initial 36' bet and storing its data locally."""
+    """
+    Handles placing the initial 36' bet and storing its data locally.
+    Includes avg goal stats in the Telegram message.
+    """
     
     # Check local state (LOCAL_TRACKED_MATCHES) for an *unresolved* bet
     if LOCAL_TRACKED_MATCHES.get(fixture_id, {}).get('bet_status') == 'unresolved':
@@ -219,7 +216,6 @@ def place_regular_bet(state, fixture_id, score, match_info, avg_goal_stats: Dict
     if score in ['1-1', '2-2', '3-3']:
         state['36_bet_placed'] = True
         state['36_score'] = score
-        # 🟢 NEW: Mark the bet status as unresolved in the local store
         state['bet_status'] = 'unresolved' 
         LOCAL_TRACKED_MATCHES[fixture_id] = state 
 
@@ -229,7 +225,7 @@ def place_regular_bet(state, fixture_id, score, match_info, avg_goal_stats: Dict
             f"🔢 Score: {score}\n"
             f"🎯 Correct Score Bet Placed for Half Time\n\n"
             
-            f"📊 *Avg Goals* (Combined $\\geq$ {MIN_TOTAL_AVERAGE_GOALS:.2f}):\n"
+            f"📊 *Average Goal Stats* (Min Ref: {MIN_TOTAL_AVERAGE_GOALS:.2f}):\n"
             f"• *Home Avg*: {avg_goal_stats['home_avg']:.2f}\n"
             f"• *Away Avg*: {avg_goal_stats['away_avg']:.2f}\n"
             f"• *Total Avg*: {avg_goal_stats['total_avg']:.2f}"
@@ -237,15 +233,12 @@ def place_regular_bet(state, fixture_id, score, match_info, avg_goal_stats: Dict
         send_telegram(message)
     else:
         state['36_bet_placed'] = True
-        # If score is not a target score, we still mark it as placed to stop checking, 
-        # but the bet status remains 'none' (or is not set).
         LOCAL_TRACKED_MATCHES[fixture_id] = state 
 
 
 def check_ht_result(state, fixture_id, score, match_info):
     """Checks the result of locally tracked bets at halftime."""
     
-    # 🟢 MODIFIED: Check local state for an unresolved bet
     local_bet_data = LOCAL_TRACKED_MATCHES.get(fixture_id)
 
     if local_bet_data and local_bet_data.get('bet_status') == 'unresolved':
@@ -276,7 +269,6 @@ def check_ht_result(state, fixture_id, score, match_info):
             
         send_telegram(message)
         
-        # 🟢 MODIFIED: Mark the bet as resolved/finished in local state
         local_bet_data['bet_status'] = 'resolved'
         LOCAL_TRACKED_MATCHES[fixture_id] = local_bet_data
         logger.info(f"Bet {fixture_id} resolved as {outcome} and marked locally.")
@@ -284,18 +276,16 @@ def check_ht_result(state, fixture_id, score, match_info):
 
 def process_live_match(match: Event):
     """
-    Processes a single live match, applying filters and checking betting conditions.
+    Processes a single live match, calculating stats and checking betting conditions.
     """
     fixture_id = str(match.id) 
     
-    # 0. Apply Average Goals Filter (Skip early if the match doesn't meet the potential)
-    avg_goal_stats = _apply_average_goals_filter(match)
-    if avg_goal_stats is None:
-        return # Skip this match
+    # 0. Calculate Average Goals Stats (NO FILTER APPLIED)
+    avg_goal_stats = _get_average_goal_stats(match)
     
     match_name = f"{match.home_team.name} vs {match.away_team.name}"
 
-    # 1. AMATEUR TOURNAMENT FILTER LOGIC
+    # 1. AMATEUR TOURNAMENT FILTER LOGIC (RETAINED)
     tournament = match.tournament
     category_name = tournament.category.name if hasattr(tournament, 'category') and tournament.category else ''
     
@@ -328,7 +318,7 @@ def process_live_match(match: Event):
     
     if status.upper() not in STATUS_LIVE and status.upper() != STATUS_HALFTIME: return
     
-    # 🟢 Get or create local state
+    # Get or create local state
     state = LOCAL_TRACKED_MATCHES.get(fixture_id) or {
         '36_bet_placed': False,
         '36_score': None,
@@ -345,15 +335,14 @@ def process_live_match(match: Event):
         
     # 2. Bet Placement Check
     if status.upper() == '1H' and minute in MINUTES_REGULAR_BET and not state.get('36_bet_placed'):
+        # Pass the calculated stats to the bet placement function
         place_regular_bet(state, fixture_id, score, match_info, avg_goal_stats)
         
     # 3. Halftime Resolution Check
-    # 🟢 MODIFIED: Check local state for an 'unresolved' bet
     elif status.upper() == STATUS_HALFTIME and state.get('bet_status') == 'unresolved':
         check_ht_result(state, fixture_id, score, match_info)
         
     # 4. Cleanup (Finished matches)
-    # 🟢 MODIFIED: Clean up the local tracking if the match is finished AND the bet is resolved or never placed
     if status in STATUS_FINISHED and state.get('bet_status') in ['none', 'resolved']:
         if fixture_id in LOCAL_TRACKED_MATCHES:
             del LOCAL_TRACKED_MATCHES[fixture_id]
@@ -368,22 +357,17 @@ def run_bot_cycle():
         logger.error("Services are not initialized. Skipping cycle.")
         return
         
-    # This call is now safe because SOFASCORE_CLIENT.initialize() ran successfully in startup
     live_matches = get_live_matches() 
     
     for match in live_matches:
         process_live_match(match)
     
-    # 🟢 Report local tracking size
     logger.info(f"Bot cycle completed. Currently tracking {len(LOCAL_TRACKED_MATCHES)} matches locally.")
 
 if __name__ == "__main__":
     if initialize_bot_services():
         try:
-            # Check if SOFASCORE_CLIENT is successfully initialized before entering loop
             if not SOFASCORE_CLIENT:
-                # This should ideally never be reached if initialize_bot_services returned True, 
-                # but serves as a final safety check.
                 raise Exception("Sofascore Client not available after initialization.")
             
             while True:
