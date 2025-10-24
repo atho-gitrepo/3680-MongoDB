@@ -166,7 +166,7 @@ def _process_event_for_betting(event: Event) -> Optional[str]:
     return None
 
 
-def start_bot_cycle():
+def run_bot_cycle():
     """
     The main execution cycle for the betting bot.
     """
@@ -231,7 +231,7 @@ def main():
 
     while True:
         try:
-            start_bot_cycle()
+            run_bot_cycle()
         except KeyboardInterrupt:
             logger.info("Bot stopped by user.")
             break
