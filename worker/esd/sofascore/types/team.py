@@ -1,13 +1,34 @@
+# esd/sofascore/types/team.py
+
 """
-This module contains the Team related data classes.
+This module contains the Team related data classes and statistics.
 """
 
+from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Dict, Any
+import logging
 from .country import Country, parse_country
 from .color import Color, parse_color
 from .manager import Manager, parse_manager
 
+logger = logging.getLogger(__name__)
+
+@dataclass
+class TeamTournamentStats:
+    """
+    Represents a team's season-long statistics in a specific tournament (league).
+    Used primarily for the average goals filter.
+    """
+    team_id: int
+    tournament_id: int
+    matches_played: int = 0
+    goals_scored_total: float = 0.0
+    goals_conceded_total: float = 0.0
+    goals_scored_average: float = 0.0
+    goals_conceded_average: float = 0.0
+    total_average_goals: float = 0.0
+    raw_data: Optional[Dict[str, Any]] = None
 
 @dataclass
 class Team:
@@ -25,20 +46,11 @@ class Team:
     color: Color = field(default_factory=Color)
     manager: Optional[Manager] = field(default_factory=Manager)
     players: Optional[list] = field(default_factory=list)
-    # gender: str = field(default="")
-    # disabled: bool = field(default=False)
-    # type: int = field(default=0)
 
 
 def parse_common_team_fields(data: dict) -> dict:
     """
     Parse common team fields.
-
-    Args:
-        data (dict): Team data.
-
-    Returns:
-        dict: Common team fields.
     """
     return {
         "name": data.get("name"),
@@ -50,23 +62,66 @@ def parse_common_team_fields(data: dict) -> dict:
         "country": parse_country(data.get("country", {})),
         "color": parse_color(data.get("teamColors", {})),
     }
-    # disabled=data.get("disabled", False),
-    # type=data.get("type", 0),
-    # gender=data.get("gender", ""),
 
 
 def parse_team(data: dict) -> Team:
     """
     Parse team data.
-
-    Args:
-        data (dict): Team data.
-
-    Returns:
-        Team: Team dataclass.
     """
     common = parse_common_team_fields(data)
     team = Team(**common)
     if "manager" in data:
         team.manager = parse_manager(data.get("manager", {}))
     return team
+
+def parse_team_tournament_stats(
+    team_id: int, 
+    tournament_id: int, 
+    data: Dict[str, Any]
+) -> TeamTournamentStats:
+    """
+    Parses the raw JSON data from the team tournament stats endpoint 
+    into a TeamTournamentStats object.
+    """
+    
+    stats = TeamTournamentStats(
+        team_id=team_id, 
+        tournament_id=tournament_id, 
+        raw_data=data
+    )
+    
+    try:
+        stat_blocks = data.get("statistics", {}).get("total", [])
+        
+        overall_stats = next(
+            (block for block in stat_blocks if block.get("type") == "overall"),
+            None
+        )
+
+        if not overall_stats:
+            logger.warning(
+                f"Stats for team {team_id} in tournament {tournament_id} found but 'overall' block is missing."
+            )
+            return stats
+            
+        stats.matches_played = overall_stats.get("matches", 0)
+
+        if stats.matches_played == 0:
+            return stats
+
+        stats.goals_scored_total = float(overall_stats.get("goalsScored", 0))
+        stats.goals_conceded_total = float(overall_stats.get("goalsConceded", 0))
+        
+        # Calculate Averages
+        stats.goals_scored_average = stats.goals_scored_total / stats.matches_played
+        stats.goals_conceded_average = stats.goals_conceded_total / stats.matches_played
+        stats.total_average_goals = stats.goals_scored_average + stats.goals_conceded_average
+        
+        return stats
+
+    except Exception as exc:
+        logger.error(
+            f"Error parsing TeamTournamentStats for Team {team_id} (Tournament {tournament_id}): {exc}",
+            exc_info=True
+        )
+        return stats
