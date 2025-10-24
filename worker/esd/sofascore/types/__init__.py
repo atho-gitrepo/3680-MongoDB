@@ -15,15 +15,15 @@ from .player_attributes import PlayerAttributes, parse_player_attributes
 from .match_stats import MatchStats, parse_match_stats
 from .lineup import Lineups, parse_lineups
 from .incident import Incident, parse_incidents
-from .top_players_match import TopPlayersMatch, parse_top_players_match
+from .top import TopPlayersMatch, parse_top_players_match
 from .comment import Comment, parse_comments
 from .shot import Shot, parse_shots
 from .tournament import Tournament, parse_tournament, parse_tournaments
 from .season import Season, parse_seasons
 from .bracket import Bracket, parse_brackets
 from .standing import Standing, parse_standings
-from .top_teams import TopTournamentTeams, parse_top_tournament_teams
-from .top_players import TopTournamentPlayers, parse_top_tournament_players
+from .top_tournment_teams import TopTournamentTeams, parse_top_tournament_teams
+from .top_tournment_players import TopTournamentPlayers, parse_top_tournament_players
 from .entity import EntityType
 from .categories import Category
 from .status import StatusType, Status
