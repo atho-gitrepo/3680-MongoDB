@@ -1,10 +1,11 @@
+# esd/sofascore/client.py
+
 """
 Sofascore client module
 """
 
 import logging
-# REMOVE: from typing import callable 
-# 'callable' is a built-in function, not a member of the typing module.
+from typing import Optional, Dict, Any # Keep 'Optional', 'Dict', 'Any' for type hints
 
 from .service import SofascoreService
 from .types import (
@@ -14,6 +15,9 @@ from .types import (
     Team,
     Category,
     EntityType,
+    # 🟢 INTEGRATION: Import TeamTournamentStats and parser
+    TeamTournamentStats,
+    parse_team_tournament_stats, 
 )
 
 
@@ -27,7 +31,7 @@ class SofascoreClient:
         Initializes the Sofascore client.
         """
         self.logger = logging.getLogger(__name__)
-        self.service: SofascoreService | None = None
+        self.service: Optional[SofascoreService] = None # Use Optional for clarity
         self.browser_path = browser_path
         self.__initialized = False
         self.logger.info("SofascoreClient initialized (service pending).")
@@ -67,11 +71,12 @@ class SofascoreClient:
         if live:
             return self.service.get_live_events()
             
-        # ✅ FIX: Use the built-in callable() without importing it.
+        # ✅ FIX: Use the built-in callable() function
         if callable(date):
             self.logger.warning("Received a callable object as 'date'. Calling it to get string date.")
             try:
-                date = date() # Call the function (e.g., get_today())
+                # Call the function (e.g., get_today())
+                date = date() 
             except Exception as e:
                 self.logger.error(f"Error calling function passed as date: {e}")
                 return []
@@ -88,7 +93,7 @@ class SofascoreClient:
             
         return self.service.search(query, entity)
 
-    def get_event(self, event_id: int) -> Event:
+    def get_event(self, event_id: int) -> Optional[Event]:
         """
         Get the event information.
         """
@@ -98,7 +103,7 @@ class SofascoreClient:
             
         return self.service.get_event(event_id)
     
-    def get_player(self, player_id: int) -> Player:
+    def get_player(self, player_id: int) -> Optional[Player]:
         """
         Get the player information.
         """
@@ -107,3 +112,19 @@ class SofascoreClient:
             return None
             
         return self.service.get_player(player_id)
+
+    # 🟢 INTEGRATION: New method for fetching team statistics
+    def get_team_tournament_stats(self, team_id: int, tournament_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Get the raw season statistics (including average goals) for a team 
+        in a specific tournament by delegating the call to the service.
+
+        Note: The parsing from raw JSON to TeamTournamentStats is handled
+        in bot.py using the separate parse_team_tournament_stats function.
+        """
+        if not self.service:
+            self.logger.error("Service not initialized. Cannot get team stats.")
+            return None
+            
+        # The service returns the raw dictionary data
+        return self.service.get_team_tournament_stats(team_id, tournament_id)
