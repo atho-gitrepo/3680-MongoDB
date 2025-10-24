@@ -15,7 +15,10 @@ class SofascoreEndpoints:
     # --- MATCH/EVENT ENDPOINTS ---
     
     events_endpoint = BASE_URL + "sport/football/scheduled-events/{date}"
-    live_events_endpoint = BASE_URL + "sport/football/scheduled-events/live"
+    # 🟢 FIX APPLIED: Update the live events endpoint URL to a more reliable structure.
+    # The previous structure was often used for all scheduled events, but this is 
+    # the dedicated one for currently live matches.
+    live_events_endpoint = BASE_URL + "sport/football/events/live"
     event_endpoint = EVENT_BASE_URL
     match_events_endpoint = EVENT_BASE_URL + "incidents"
     match_lineups_endpoint = EVENT_BASE_URL + "lineups"
