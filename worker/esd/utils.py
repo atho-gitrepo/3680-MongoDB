@@ -9,9 +9,14 @@ from datetime import datetime
 import httpx
 from lxml import html
 from playwright.sync_api import Page
+import logging # 🟢 ADDED: Logging module import
+
+# 🟢 ADDED: Setup logger for this module
+logger = logging.getLogger("esd.utils") 
 
 
 def get_today() -> str:
+# ... (rest of function remains the same)
     """
     Get the current date in the format "YYYY-MM-DD".
 
@@ -22,6 +27,7 @@ def get_today() -> str:
 
 
 def current_year(shift: int = 0) -> int:
+# ... (rest of function remains the same)
     """
     Get the current year.
 
@@ -35,6 +41,7 @@ def current_year(shift: int = 0) -> int:
 
 
 def camel_to_snake(name: str) -> str:
+# ... (rest of function remains the same)
     """
     Convert a camel case string to a snake case string.
 
@@ -98,17 +105,17 @@ def get_json(page: Page, url: str) -> dict:
                 data = json.loads(json_string)
                 if "error" in data and "code" in data["error"]:
                     code = data["error"]["code"]
-                    # Note: We keep the console prints here as they were in the original code
+                    # 🟢 FIX: Replace print() with proper logging
                     if code == 403:
-                        print(
-                            "Access denied. Please use a proxt, VPN or renew your ip address."
+                        logger.warning(
+                            "Sofascore API access denied (Code 403). Please check proxy/IP address."
                         )
                     if code == 404:
-                        print("No found.")
+                        logger.info("Sofascore API endpoint returned 404, resource not found.") # 🟢 FIX APPLIED HERE
                     return {}
                 return data
             except json.JSONDecodeError as e:
-                print("Could not decode JSON:", e)
+                logger.error("Could not decode JSON from response:", exc_info=True) # 🟢 Logging the error properly
                 return {}
         return {}
     except httpx.HTTPStatusError as exc:
@@ -119,6 +126,7 @@ def get_json(page: Page, url: str) -> dict:
 
 
 def get_document(proxies: dict = None, url: str = None) -> html.HtmlElement:
+# ... (rest of function remains the same)
     """
     Get the HTML document from the given URL.
 
@@ -141,6 +149,7 @@ def get_document(proxies: dict = None, url: str = None) -> html.HtmlElement:
 
 
 def is_available_date(date: str, pattern: str) -> None:
+# ... (rest of function remains the same)
     """
     Check if the given date is available.
 
