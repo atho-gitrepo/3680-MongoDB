@@ -1,5 +1,3 @@
-# /app/worker/bot.py
-
 import requests
 import os
 import json
@@ -38,7 +36,6 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # --- CONSTANTS ---
-# 🟢 MODIFIED: Removed unused constants related to fixture API and resolution
 SLEEP_TIME = 60
 MINUTES_REGULAR_BET = [36, 37]
 BET_TYPE_REGULAR = 'regular'
@@ -61,11 +58,12 @@ AMATEUR_KEYWORDS = [
 # 📌 INITIALIZATION FUNCTIONS
 # =========================================================
 
-# 🔴 REMOVED: FirebaseManager class and related imports are deleted.
-
 def initialize_sofascore_client():
     """
     Initializes and sets the global SOFASCORE_CLIENT object.
+    
+    CRITICAL FIX: This now explicitly calls the initialize method on the
+    SofascoreClient, which in turn starts the Playwright browser.
     """
     global SOFASCORE_CLIENT
     
@@ -75,9 +73,13 @@ def initialize_sofascore_client():
 
     logger.info("Attempting to initialize Sofascore client...")
     try:
+        # 1. Instantiate the Client (Lightweight)
         SOFASCORE_CLIENT = SofascoreClient()
-        # SOFASCORE_CLIENT.initialize() # Assuming client initializes itself in __init__ or initialization is called in main
-        logger.info("Sofascore client successfully initialized.")
+        
+        # 2. 🟢 CRITICAL FIX: Explicitly start the underlying Playwright Service (Heavy)
+        SOFASCORE_CLIENT.initialize() 
+        
+        logger.info("Sofascore client successfully initialized and service is ready.")
         return True
     except Exception as e:
         logger.critical(f"FATAL: SofascoreClient failed to initialize. Error: {e}", exc_info=True)
@@ -89,8 +91,6 @@ def initialize_bot_services():
     
     logger.info("Initializing Football Betting Bot services...")
     
-    # 🔴 REMOVED: Firebase initialization logic
-        
     # 1. Initialize the Sofascore Client
     if not initialize_sofascore_client():
         logger.critical("Bot cannot proceed. Sofascore client initialization failed.")
@@ -198,6 +198,8 @@ def get_live_matches():
         logger.error("Sofascore client is not initialized.")
         return []
     try:
+        # Note: SOFASCORE_CLIENT.get_events(live=True) calls get_live_events() 
+        # which checks service readiness inside the client.
         live_events = SOFASCORE_CLIENT.get_events(live=True) 
         logger.info(f"Fetched {len(live_events)} live matches.")
         return live_events
@@ -205,8 +207,6 @@ def get_live_matches():
         logger.error(f"Sofascore API Error fetching live matches: {e}")
         return []
 
-# 🔴 REMOVED: get_finished_match_details and robust_get_finished_match_details are not needed 
-#             since we no longer resolve stale bets that persist past the current cycle.
 
 def place_regular_bet(state, fixture_id, score, match_info, avg_goal_stats: Dict[str, float]):
     """Handles placing the initial 36' bet and storing its data locally."""
@@ -281,7 +281,6 @@ def check_ht_result(state, fixture_id, score, match_info):
         LOCAL_TRACKED_MATCHES[fixture_id] = local_bet_data
         logger.info(f"Bet {fixture_id} resolved as {outcome} and marked locally.")
     
-    # 🔴 REMOVED: No more cleanup based on external Firebase check
 
 def process_live_match(match: Event):
     """
@@ -369,12 +368,11 @@ def run_bot_cycle():
         logger.error("Services are not initialized. Skipping cycle.")
         return
         
+    # This call is now safe because SOFASCORE_CLIENT.initialize() ran successfully in startup
     live_matches = get_live_matches() 
     
     for match in live_matches:
         process_live_match(match)
-    
-    # 🔴 REMOVED: check_and_resolve_stale_bets() is no longer called
     
     # 🟢 Report local tracking size
     logger.info(f"Bot cycle completed. Currently tracking {len(LOCAL_TRACKED_MATCHES)} matches locally.")
@@ -382,8 +380,10 @@ def run_bot_cycle():
 if __name__ == "__main__":
     if initialize_bot_services():
         try:
-            # 🟢 Check if SOFASCORE_CLIENT is successfully initialized before entering loop
+            # Check if SOFASCORE_CLIENT is successfully initialized before entering loop
             if not SOFASCORE_CLIENT:
+                # This should ideally never be reached if initialize_bot_services returned True, 
+                # but serves as a final safety check.
                 raise Exception("Sofascore Client not available after initialization.")
             
             while True:
