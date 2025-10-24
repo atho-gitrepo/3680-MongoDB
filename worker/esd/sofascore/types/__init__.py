@@ -10,7 +10,7 @@ from .player import Player, parse_player
 from .country import Country, parse_country
 from .color import Color, parse_color
 from .manager import Manager, parse_manager
-from .transfer_history import TransferHistory, parse_transfer_history
+from .transfer import TransferHistory, parse_transfer_history
 from .player_attributes import PlayerAttributes, parse_player_attributes
 from .match_stats import MatchStats, parse_match_stats
 from .lineups import Lineups, parse_lineups
