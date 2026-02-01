@@ -41,4 +41,4 @@ steps:
       - '8080'
       - '--no-cpu-throttling'
       - '--allow-unauthenticated'
-      - '--quiet
+      - '--quiet'
