@@ -1,0 +1,112 @@
+# cloudbuild.yaml
+steps:
+  # Step 1: Install Playwright system dependencies (pre-build optimization)
+  - name: 'ubuntu:22.04'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "Installing Playwright system dependencies..."
+        apt-get update && \
+        apt-get install -y wget gnupg ca-certificates \
+          fonts-liberation libappindicator3-1 libasound2 \
+          libatk-bridge2.0-0 libatk1.0-0 libcups2 libdbus-1-3 \
+          libgdk-pixbuf2.0-0 libgtk-3-0 libnspr4 libnss3 \
+          libx11-6 libxcomposite1 libxdamage1 libxext6 \
+          libxfixes3 libxrandr2 libxss1 libxtst6 xdg-utils \
+          libgbm1 libdrm2 libxkbcommon0 ttf-freefont \
+          fonts-noto-color-emoji fonts-freefont-ttf \
+          libpango-1.0-0 libpangocairo-1.0-0 libcairo2 \
+          libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 \
+          libopenh264-6 libopus0 curl git
+        apt-get clean
+        rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+  # Step 2: Build the Docker image with caching
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/football-bot:$COMMIT_SHA'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/football-bot:latest'
+      - '--build-arg'
+      - 'BUILDKIT_INLINE_CACHE=1'
+      - '--cache-from'
+      - 'gcr.io/$PROJECT_ID/football-bot:latest'
+      - '.'
+
+  # Step 3: Push the image to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/football-bot:$COMMIT_SHA']
+
+  # Step 4: Push the latest tag
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/football-bot:latest']
+
+  # Step 5: Deploy to Cloud Run
+  - name: 'gcr.io/cloud-builders/gcloud'
+    args:
+      - 'run'
+      - 'deploy'
+      - 'football-betting-bot'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/football-bot:$COMMIT_SHA'
+      - '--region'
+      - 'us-central1'
+      - '--platform'
+      - 'managed'
+      - '--memory'
+      - '2Gi'
+      - '--cpu'
+      - '2'
+      - '--max-instances'
+      - '3'
+      - '--min-instances'
+      - '1'
+      - '--concurrency'
+      - '80'
+      - '--timeout'
+      - '3600s'
+      - '--set-env-vars'
+      - 'PLAYWRIGHT_EXECUTABLE_PATH=/ms-playwright/chromium-linux64/chrome,AUTO_START_BOT=true,PORT=8080,TZ=UTC'
+      - '--port'
+      - '8080'
+      - '--no-cpu-throttling'
+      - '--allow-unauthenticated'
+      - '--ingress=all'
+      - '--labels'
+      - 'app=football-bot,env=production,version=$COMMIT_SHA'
+      - '--quiet'
+
+  # Step 6: Clean up old images (optional)
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        # Keep only last 5 images
+        gcloud container images list-tags gcr.io/$PROJECT_ID/football-bot \
+          --sort-by=~timestamp \
+          --format='get(digest)' \
+          | tail -n +6 \
+          | xargs -I {} gcloud container images delete gcr.io/$PROJECT_ID/football-bot@{} --force-delete-tags --quiet 2>/dev/null || true
+
+# Timeout for the build (30 minutes)
+timeout: 1800s
+
+# Images built by this build
+images:
+  - 'gcr.io/$PROJECT_ID/football-bot:$COMMIT_SHA'
+  - 'gcr.io/$PROJECT_ID/football-bot:latest'
+
+# Optional: Add substitutions for environment-specific variables
+substitutions:
+  _ENVIRONMENT: 'production'
+  _REGION: 'us-central1'
+
+# Optional: Add tags to the build
+tags:
+  - 'cloud-run'
+  - 'football-bot'
+  - 'automated-deploy'
