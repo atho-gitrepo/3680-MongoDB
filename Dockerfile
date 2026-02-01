@@ -10,6 +10,7 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app
 
 # 3. INSTALL SYSTEM DEPENDENCIES FOR PLAYWRIGHT/CHROMIUM
+# Updated with correct package names for Debian bullseye
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         wget \
@@ -38,20 +39,22 @@ RUN apt-get update && \
         libgbm1 \
         libdrm2 \
         libxkbcommon0 \
-        ttf-freefont \
-        fonts-noto-color-emoji \
         fonts-freefont-ttf \
-        # Additional dependencies for better stability
+        fonts-noto-color-emoji \
+        fonts-liberation2 \
         libpango-1.0-0 \
         libpangocairo-1.0-0 \
         libcairo2 \
         libgstreamer1.0-0 \
         libgstreamer-plugins-base1.0-0 \
-        libopenh264-6 \
+        libopenh264-5 \
         libopus0 \
-        # For Firebase/Firestore
         curl \
         git \
+        # Additional fonts
+        fonts-dejavu-core \
+        fonts-dejavu-extra \
+        fonts-droid-fallback \
         && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
