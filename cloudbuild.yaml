@@ -1,0 +1,44 @@
+steps:
+  # Build the Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/football-bot:$COMMIT_SHA'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/football-bot:latest'
+      - '.'
+
+  # Push the image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/football-bot:$COMMIT_SHA']
+
+  # Deploy to Cloud Run
+  - name: 'gcr.io/cloud-builders/gcloud'
+    args:
+      - 'run'
+      - 'deploy'
+      - 'football-betting-bot'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/football-bot:$COMMIT_SHA'
+      - '--region'
+      - 'us-central1'
+      - '--platform'
+      - 'managed'
+      - '--memory'
+      - '2Gi'
+      - '--cpu'
+      - '2'
+      - '--max-instances'
+      - '3'
+      - '--min-instances'
+      - '1'
+      - '--timeout'
+      - '3600s'
+      - '--set-env-vars'
+      - 'PLAYWRIGHT_EXECUTABLE_PATH=/ms-playwright/chromium-linux64/chrome,AUTO_START_BOT=true,PORT=8080'
+      - '--port'
+      - '8080'
+      - '--no-cpu-throttling'
+      - '--allow-unauthenticated'
+      - '--quiet'
