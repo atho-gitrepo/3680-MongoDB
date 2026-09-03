@@ -126,6 +126,7 @@ Never commit real Telegram or Firebase credentials.
 | `worker/main.py` | Supervisor loop, shutdown handling, metrics server, polling interval |
 | `worker/bot.py` | Filters, live evaluation, value checks, staking integration, settlement |
 | `worker/esd/fotmob.py` | FotMob requests, endpoint fallbacks, normalization, feature extraction |
+| `worker/esd/livescore.py` | LiveScore fallback discovery, statistics, incidents, and odds |
 | `worker/esd/sofascore/service.py` | FotMob-first provider orchestration and legacy fallbacks |
 | `worker/esd/sofascore/client.py` | Public client facade for events, details, and live features |
 | `worker/staking_engine.py` | Stake state, bankroll, results, pause protection |

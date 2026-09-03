@@ -17,6 +17,9 @@ from typing import Optional, Dict, List, Any, Set, Tuple
 import firebase_admin
 from firebase_admin import credentials, firestore
 from esd.sofascore import SofascoreClient
+from esd.fotmob import FotMobProvider
+from esd.livescore import LiveScoreProvider
+from esd.sofascore.types import parse_event
 
 # Import shared metrics registry to prevent circular imports
 from metrics import STATE_LOCKS, BET_TRIGGERS, API_FAILURES
@@ -703,6 +706,70 @@ def _extract_match_odds(details: Dict[str, Any]) -> Optional[float]:
     return min(candidates) if candidates else None
 
 
+def get_live_features_from_providers(match_id: int | str) -> Dict[str, Any]:
+    """Fetch features using FotMob first, then LiveScore, then SofaScore."""
+    providers = (
+        (FOTMOB_CLIENT, lambda provider: provider.extract_features(provider.get_match_details(match_id))),
+        (LIVESCORE_CLIENT, lambda provider: provider.get_live_features(match_id)),
+        (SOFASCORE_CLIENT, lambda provider: provider.get_live_features(int(match_id))),
+    )
+    for provider, fetch in providers:
+        if provider is None:
+            continue
+        try:
+            features = fetch(provider)
+            feature_keys = (
+                'combined_xg', 'combined_shots', 'combined_sot',
+                'combined_corners', 'combined_big_chances',
+                'combined_dangerous_attacks', 'red_cards',
+            )
+            if features and any(key in features for key in feature_keys):
+                features['_provider'] = features.get('provider', provider.__class__.__name__.lower())
+                return features
+        except Exception as exc:
+            logger.debug("Feature provider %s failed for %s: %s", provider.__class__.__name__, match_id, exc)
+    return {}
+
+
+def get_match_odds_from_providers(match_id: int | str) -> Optional[float]:
+    """Return the best valid Under 0.5 HT price from configured providers."""
+    candidates: List[float] = []
+    if FOTMOB_CLIENT:
+        try:
+            odds = _extract_match_odds(FOTMOB_CLIENT.get_match_details(match_id) or {})
+            if odds is not None:
+                candidates.append(odds)
+        except Exception as exc:
+            logger.debug("FotMob odds failed for %s: %s", match_id, exc)
+    if LIVESCORE_CLIENT:
+        try:
+            for key, value in (LIVESCORE_CLIENT.get_match_odds(match_id) or {}).items():
+                if 'under05' in key and 1.01 <= value <= 20:
+                    candidates.append(float(value))
+        except Exception as exc:
+            logger.debug("LiveScore odds failed for %s: %s", match_id, exc)
+    return max(candidates) if candidates else None
+
+
+def _normalize_livescore_event(raw: Dict[str, Any]):
+    stage = raw.get('Stg', {}) or {}
+    home = (raw.get('T1') or [{}])[0]
+    away = (raw.get('T2') or [{}])[0]
+    status = str(raw.get('Eps', 'NS')).replace("'", '').split('+')[0]
+    return parse_event({
+        'id': raw.get('Eid', 0),
+        'homeTeam': {'name': home.get('Nm', 'Unknown')},
+        'awayTeam': {'name': away.get('Nm', 'Unknown')},
+        'homeScore': {'current': raw.get('Tr1', 0)},
+        'awayScore': {'current': raw.get('Tr2', 0)},
+        'status': {'description': status},
+        'tournament': {
+            'name': stage.get('Snm') or stage.get('CompN') or 'Unknown League',
+            'category': {'name': stage.get('Cnm') or 'World'},
+        },
+    })
+
+
 def evaluate_under05_live(match, features: Dict[str, Any], minute: int) -> Dict[str, Any]:
     """Return a conservative live Under-0.5-HT decision.
 
@@ -867,7 +934,7 @@ def process_match(match):
         else:
             # FotMob is now the preferred detailed live feed. If details fail,
             # the strategy stays out rather than falling back to a blind bet.
-            features = SOFASCORE_CLIENT.get_live_features(int(fid)) if SOFASCORE_CLIENT else {}
+            features = get_live_features_from_providers(fid)
             evaluation = evaluate_under05_live(match, features, live_pitch_minute)
 
             # Preserve the last evaluation for diagnostics and later analysis.
@@ -880,8 +947,7 @@ def process_match(match):
                 logger.info(f"🛡️ NO BET | {match_name} | {live_pitch_minute}' 0-0 | {evaluation['reason']}")
             else:
                 # Try to retrieve actual market odds from the same detail payload.
-                details = SOFASCORE_CLIENT.get_fotmob_match_details(int(fid)) if SOFASCORE_CLIENT else {}
-                odds = _extract_match_odds(details)
+                odds = get_match_odds_from_providers(fid)
                 configured_odds = os.getenv('UNDER05_MARKET_ODDS', '').strip()
                 if odds is None and configured_odds:
                     try:
@@ -1047,11 +1113,15 @@ def process_match(match):
 # Initialize global Firebase manager
 firebase_manager = None
 SOFASCORE_CLIENT = None
+FOTMOB_CLIENT = None
+LIVESCORE_CLIENT = None
 
 def initialize_bot_services() -> bool:
-    global firebase_manager, SOFASCORE_CLIENT
+    global firebase_manager, SOFASCORE_CLIENT, FOTMOB_CLIENT, LIVESCORE_CLIENT
     firebase_manager = FirebaseManager(FIREBASE_CREDENTIALS)
     try:
+        FOTMOB_CLIENT = FotMobProvider()
+        LIVESCORE_CLIENT = LiveScoreProvider()
         SOFASCORE_CLIENT = SofascoreClient()
         SOFASCORE_CLIENT.initialize()
 
@@ -1077,18 +1147,31 @@ def initialize_bot_services() -> bool:
         return False
 
 def shutdown_bot():
-    global SOFASCORE_CLIENT
+    global SOFASCORE_CLIENT, FOTMOB_CLIENT, LIVESCORE_CLIENT
     if SOFASCORE_CLIENT:
         try:
             SOFASCORE_CLIENT.close()
         except Exception as e:
             logger.error(f"Error shutting down client: {e}")
+    for provider in (FOTMOB_CLIENT, LIVESCORE_CLIENT):
+        if provider and getattr(provider, 'session', None):
+            provider.session.close()
+    FOTMOB_CLIENT = None
+    LIVESCORE_CLIENT = None
 
 def run_bot_cycle():
-    if not SOFASCORE_CLIENT:
+    if not (FOTMOB_CLIENT or LIVESCORE_CLIENT or SOFASCORE_CLIENT):
         return
     try:
-        events = SOFASCORE_CLIENT.get_events(live=True)
+        events = []
+        if FOTMOB_CLIENT:
+            from esd.utils import get_today
+            events = [FOTMOB_CLIENT.normalize_event(raw) for raw in FOTMOB_CLIENT.get_live_matches(get_today())]
+            events = [parse_event(event) for event in events]
+        if not events and LIVESCORE_CLIENT:
+            events = [_normalize_livescore_event(raw) for raw in LIVESCORE_CLIENT.get_live_matches()]
+        if not events and SOFASCORE_CLIENT:
+            events = SOFASCORE_CLIENT.get_events(live=True)
         if not events:
             logger.debug("No live events found in current cycle.")
             return
